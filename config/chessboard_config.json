@@ -1,0 +1,8 @@
+{
+  "_说明": "棋盘配置真源（config/chessboard_config.json）。务必与实物格宽一致；不符则内外参全错。",
+  "pattern_size": [
+    8,
+    6
+  ],
+  "square_size_m": 0.025
+}

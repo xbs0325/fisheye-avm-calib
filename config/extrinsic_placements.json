@@ -1,0 +1,23 @@
+{
+  "_说明": "外参摆位真源（config/extrinsic_placements.json）。near_m=板近边到车体中心距离(m)，测量误差会直接变成接缝误差。",
+  "front": {
+    "near_m": 0.35,
+    "lateral_m": 0.0,
+    "orient": "long-lateral"
+  },
+  "back": {
+    "near_m": 0.35,
+    "lateral_m": 0.0,
+    "orient": "long-lateral"
+  },
+  "left": {
+    "near_m": 0.35,
+    "lateral_m": 0.0,
+    "orient": "long-lateral"
+  },
+  "right": {
+    "near_m": 0.35,
+    "lateral_m": 0.0,
+    "orient": "long-lateral"
+  }
+}
