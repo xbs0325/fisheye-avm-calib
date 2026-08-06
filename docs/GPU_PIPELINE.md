@@ -13,7 +13,7 @@ source ~/bev_demo/avm_gpu/scripts/env_opencv_cuda.sh
 | `avm/wizard.py` | CLI（含 `--web`） |
 
 ```
-抓帧 → GPU remap → GPU warp → GPU 累加 → download → **WebRTC (aiortc)** → 浏览器
+抓帧 → GPU remap → warp → blend → download → **WebRTC (aiortc)** → 浏览器
 ```
 
 主推流为 WebRTC；不再以 MJPEG 为主路径。

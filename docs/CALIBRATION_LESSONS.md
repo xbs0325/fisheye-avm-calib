@@ -275,4 +275,4 @@ stable / burst 等，写回 `config/*.json`；保存后重新开始推流生效�
 
 ## 5. 配置真源
 
-`config/camera_config.json`、`chessboard_config.json`、`extrinsic_placements.json`、`web_calib_settings.json`、`calib_results/`。网页 `/api/config` 可读写前几项（camera 映射默认不改，防误改设备号）。
+`config/camera_profile.json`（分辨率/设备/fourcc）、`camera_config.json`（设备号同步副本）、`chessboard_config.json`、`extrinsic_placements.json`、`web_calib_settings.json`、`calib_results/`。网页 `/api/config` 可读写这些项；改分辨率后需重标，状态页 Probe 可验开流。

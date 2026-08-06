@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+output
+calib_images
+calib_results
+debug_detect
+docs
+*.obsolete*
+*.backup*
+.cursor
+agent-transcripts

@@ -1,5 +1,27 @@
 # 工作记录 WORKLOG
 
+> **AVM 部署记录**（汇报用叙事）：[`PROJECT_HISTORY.md`](PROJECT_HISTORY.md)。本文件保留按日流水。
+
+## 2026-08-06 — 成文：项目创作与部署全记录
+
+- 新增 `docs/PROJECT_HISTORY.md`（建仓动机 → GPU Web → 外参/性能/接缝 → Docker/CSI）
+- `DEPLOY_0.2.0.md` 收成开箱摘录，避免与全史重复
+
+## 2026-08-06 — 0.2.0 部署收尾（Docker 开箱实测）
+
+详见 `docs/PROJECT_HISTORY.md` §3 与 `docs/DOCKER.md`。
+
+- 基础镜像改为 `ubuntu:24.04`（无 l4t-jetpack r39）
+- stage：relocatable cv2 config + 递归打包 FFmpeg8/CUDA13 依赖；`import cv2` → `4.14.0 1`
+- CSI：补挂 `media0` / `camsync` / `capture-vi-channel*`，四路 probe + smoke 通过
+- 交付：`scripts/docker_run_web.sh`、更新 compose / DOCKER / DEPLOY 文档；Hub 镜像名 `leucushc/avm-gpu:0.2.0`
+
+## 2026-08-06 — 通用分辨率 + JP7.2 Docker（0.2.0）
+
+- `config/camera_profile.json` + `avm/camera_io.py` 统一开流/探针；去掉硬编码 1920×1536
+- `/api/cameras/probe`、`/api/stream/smoke`；Web 相机配置与 Probe UI；状态报告左下 / 日志右下
+- `Dockerfile` / `docker-compose.yml` / `docs/DOCKER.md`（预编译 CUDA OpenCV COPY）
+
 ## 2026-08-06 — 接缝：全部完成后停自动精修
 
 日志里一串「接缝精修全部完成」却仍对 back+right 连拍：`seam_complete` 未置位，

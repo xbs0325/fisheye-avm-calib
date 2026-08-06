@@ -113,7 +113,7 @@ def check_intrinsics_quality(calib_dir: Path) -> dict:
             result["details"][d] = {
                 "rms": None,
                 "status": "fail",
-                "warnings": [f"缺少 {d}.json"],
+                "warnings": [f"missing {d}.json"],
             }
             result["all_pass"] = False
             worst = "fail"
@@ -123,7 +123,7 @@ def check_intrinsics_quality(calib_dir: Path) -> dict:
         ev = data.get("evaluation", {})
         warnings = list(ev.get("warnings", []))
         if rms is None:
-            status, warnings = "fail", warnings + ["缺少 RMS"]
+            status, warnings = "fail", warnings + ["missing RMS"]
             result["all_pass"] = False
             worst = "fail"
         elif float(rms) > INTRINSIC_RMS_FAIL:
@@ -172,7 +172,7 @@ def check_extrinsics_quality(path: Path) -> dict:
     if not path.is_file():
         result["all_pass"] = False
         result["status"] = "fail"
-        result["global_warnings"].append(f"外参不存在: {path}")
+        result["global_warnings"].append(f"extrinsics missing: {path}")
         return result
     data = json.loads(path.read_text(encoding="utf-8"))
     homographies = data.get("homographies", {})
@@ -188,7 +188,7 @@ def check_extrinsics_quality(path: Path) -> dict:
         status = q.get("status", "ok" if d in qc else "warn")
         warnings = list(q.get("warnings", []))
         if d not in qc:
-            status, warnings = "warn", ["无 QC 数据"]
+            status, warnings = "warn", ["no QC data"]
             if worst == "pass":
                 worst = "warn"
         elif status == "bad":
@@ -200,13 +200,13 @@ def check_extrinsics_quality(path: Path) -> dict:
     result["status"] = "fail" if worst == "fail" else worst
     if result["missing_cameras"]:
         result["global_warnings"].append(
-            f"缺少 {'/'.join(result['missing_cameras'])} 路外参"
+            f"missing extrinsic cams: {'/'.join(result['missing_cameras'])}"
         )
     result["global_warnings"].extend(data.get("global_warnings") or [])
     # Known hard problem banner
     result["global_warnings"].append(
-        "【已知难点】外参（单应 H）目前无法稳定自动、准确标定；"
-        "接缝误差大属预期，详见 docs/CALIBRATION_LESSONS.md §外参"
+        "[known hard] Extrinsic H is hard to make fully automatic/accurate; "
+        "seam error is expected — see docs/CALIBRATION_LESSONS.md"
     )
     return result
 

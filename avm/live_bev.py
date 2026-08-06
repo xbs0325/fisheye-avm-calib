@@ -38,7 +38,9 @@ DEFAULT_EXTRINSICS = os.path.join(DEFAULT_CALIB_DIR, "extrinsics.json")
 DEFAULT_OUTPUT_DIR = os.path.join(DEFAULT_CALIB_DIR, "live_captures")
 
 DIRECTIONS = ["front", "back", "left", "right"]
-CAPTURE_W, CAPTURE_H = 1920, 1536
+CAPTURE_W, CAPTURE_H = __import__(
+    "avm.camera_io", fromlist=["capture_size"]
+).capture_size()
 
 
 # ==================== 数据加载 ====================

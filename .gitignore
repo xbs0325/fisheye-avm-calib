@@ -14,3 +14,5 @@ debug_detect/
 *.obsolete*
 *.backup*
 .DS_Store
+# Staged CUDA OpenCV for Docker build (see scripts/stage_opencv_for_docker.sh)
+docker/opencv-cuda/

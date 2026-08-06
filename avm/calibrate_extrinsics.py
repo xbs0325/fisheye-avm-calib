@@ -127,8 +127,9 @@ CAM_AXIS = {"front": (0.0, 1.0), "back": (0.0, -1.0),
             "right": (1.0, 0.0), "left": (-1.0, 0.0)}
 
 # 采集分辨率（与内参标定一致）
-CAPTURE_WIDTH = 1920
-CAPTURE_HEIGHT = 1536
+CAPTURE_WIDTH, CAPTURE_HEIGHT = __import__(
+    "avm.camera_io", fromlist=["capture_size"]
+).capture_size()
 # 实时预览：硬件缩小 + 多线程取流；SPACE 才开全分辨率求 H。
 DISPLAY_WIDTH = 480
 DISPLAY_HEIGHT = 360

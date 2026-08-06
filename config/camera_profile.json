@@ -1,0 +1,14 @@
+{
+  "_说明": "四路相机采集配置。width/height 为请求分辨率；实际以驱动返回为准。改分辨率后请重做内参/外参。",
+  "width": 1920,
+  "height": 1536,
+  "fourcc": "YUYV",
+  "backend": "v4l2",
+  "gst_pipeline_template": "",
+  "cameras": {
+    "front": {"device": 2},
+    "back": {"device": 0},
+    "left": {"device": 3},
+    "right": {"device": 1}
+  }
+}

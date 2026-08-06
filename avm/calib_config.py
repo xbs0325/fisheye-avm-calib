@@ -12,6 +12,7 @@ BOARD_PATH = ROOT / "config" / "chessboard_config.json"
 PLACEMENTS_PATH = ROOT / "config" / "extrinsic_placements.json"
 SETTINGS_PATH = ROOT / "config" / "web_calib_settings.json"
 CAMERA_PATH = ROOT / "config" / "camera_config.json"
+PROFILE_PATH = ROOT / "config" / "camera_profile.json"
 
 DIRECTIONS = ("front", "back", "left", "right")
 
@@ -65,12 +66,15 @@ def load_settings() -> dict[str, Any]:
 
 
 def load_all_config() -> dict[str, Any]:
+    from avm.camera_io import profile_for_web
+
     board = _read_json(BOARD_PATH) if BOARD_PATH.is_file() else {
         "pattern_size": [8, 6], "square_size_m": 0.025
     }
     placements = _read_json(PLACEMENTS_PATH) if PLACEMENTS_PATH.is_file() else {}
     camera = _read_json(CAMERA_PATH) if CAMERA_PATH.is_file() else {}
     settings = load_settings()
+    profile = profile_for_web()
     return {
         "chessboard": {
             "pattern_cols": int(board.get("pattern_size", [8, 6])[0]),
@@ -87,17 +91,21 @@ def load_all_config() -> dict[str, Any]:
         },
         "settings": settings,
         "camera": {d: int(camera[d]) for d in DIRECTIONS if d in camera},
+        "camera_profile": profile,
         "paths": {
             "chessboard": str(BOARD_PATH),
             "placements": str(PLACEMENTS_PATH),
             "settings": str(SETTINGS_PATH),
             "camera": str(CAMERA_PATH),
+            "camera_profile": str(PROFILE_PATH),
         },
     }
 
 
 def save_all_config(payload: dict[str, Any]) -> dict[str, Any]:
-    """根据网页表单写回 JSON。忽略 camera 映射（防误改设备号，除非显式带 camera）。"""
+    """根据网页表单写回 JSON。camera_profile 可更新设备号与分辨率。"""
+    from avm.camera_io import save_camera_profile
+
     changed: list[str] = []
 
     board_in = payload.get("chessboard") or {}
@@ -170,12 +178,25 @@ def save_all_config(payload: dict[str, Any]) -> dict[str, Any]:
         _write_json(SETTINGS_PATH, cur)
         changed.append("settings")
 
-    cam_in = payload.get("camera")
-    if isinstance(cam_in, dict) and cam_in:
-        data = {d: int(cam_in[d]) for d in DIRECTIONS if d in cam_in}
-        if len(data) != 4:
-            raise ValueError("camera 需包含 front/back/left/right")
-        _write_json(CAMERA_PATH, data)
-        changed.append("camera")
+    # Prefer camera_profile; fall back to legacy camera map
+    profile_in = payload.get("camera_profile")
+    if isinstance(profile_in, dict) and profile_in:
+        save_camera_profile(profile_in)
+        changed.append("camera_profile")
+    else:
+        cam_in = payload.get("camera")
+        if isinstance(cam_in, dict) and cam_in:
+            data = {d: int(cam_in[d]) for d in DIRECTIONS if d in cam_in}
+            if len(data) != 4:
+                raise ValueError("camera 需包含 front/back/left/right")
+            _write_json(CAMERA_PATH, data)
+            # keep profile devices in sync
+            from avm.camera_io import load_camera_profile, save_camera_profile
+
+            prof = load_camera_profile()
+            for d, idx in data.items():
+                prof.setdefault("cameras", {}).setdefault(d, {})["device"] = idx
+            save_camera_profile(prof)
+            changed.append("camera")
 
     return {"ok": True, "changed": changed, "config": load_all_config()}

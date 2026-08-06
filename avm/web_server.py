@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,6 +50,7 @@ STATE: dict[str, Any] = {
     "skipped_extrinsics": False,
     "calib_proc": None,
     "message": "",
+    "last_probe": None,
 }
 STATE_LOCK = threading.Lock()
 
@@ -77,13 +79,27 @@ header {
 header h1 { margin:0; font-size:1.4rem; letter-spacing:0.02em; }
 header .sub { color: var(--muted); font-size:0.9rem; }
 main {
-  display:grid; grid-template-columns: 340px 1fr; gap:1rem;
-  padding: 0.75rem 1.5rem 1.5rem;
+  display:grid; grid-template-columns: 280px minmax(0, 1fr) 340px; gap:1rem;
+  padding: 0.75rem 1.5rem 1.5rem; align-items: stretch;
+  min-height: calc(100vh - 4.5rem);
 }
-@media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) {
+  main { grid-template-columns: 1fr; min-height: 0; }
+}
 .panel {
   background: color-mix(in srgb, var(--panel) 92%, black);
   border: 1px solid var(--line); border-radius: 12px; padding: 1rem;
+}
+.panel-left, .panel-right {
+  display:flex; flex-direction:column; gap:0.75rem;
+  max-height: calc(100vh - 5rem); overflow: hidden;
+}
+.panel-left .steps { flex: 0 0 auto; }
+.panel-left .report-wrap, .panel-right .log-wrap {
+  flex: 1 1 auto; min-height: 0; display:flex; flex-direction:column;
+}
+.panel-right .cfg {
+  flex: 0 1 auto; max-height: 48%; overflow: auto;
 }
 .steps { display:flex; flex-direction:column; gap:0.5rem; }
 .step {
@@ -94,6 +110,8 @@ main {
 .step h3 { margin:0 0 0.25rem; font-size:0.95rem; }
 .step p { margin:0; color:var(--muted); font-size:0.8rem; }
 .row { display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.75rem; }
+.row.stack { flex-direction: column; }
+.row.stack button { width: 100%; text-align: left; }
 button {
   appearance:none; border:1px solid var(--line); background:#243040; color:var(--text);
   border-radius:8px; padding:0.55rem 0.85rem; cursor:pointer; font:inherit;
@@ -116,21 +134,24 @@ button:disabled { opacity:0.45; cursor:not-allowed; }
 .badge.ok { color:var(--ok); border-color:var(--ok); }
 .badge.bad { color:var(--bad); border-color:var(--bad); }
 .badge.warn { color:var(--warn); border-color:var(--warn); }
-pre {
+pre#report {
   background:#0c1015; border:1px solid var(--line); border-radius:8px;
-  padding:0.75rem; overflow:auto; font-size:0.78rem; max-height:220px;
+  padding:0.75rem; overflow:auto; font-size:0.78rem;
+  flex: 1 1 auto; min-height: 160px; margin: 0;
 }
 .note { color:var(--warn); font-size:0.82rem; margin-top:0.75rem; line-height:1.4; }
+.side-h {
+  margin:0 0 0.4rem; font-size:0.9rem; color:var(--muted);
+  display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
+}
+.side-h button { padding:0.25rem 0.55rem; font-size:0.75rem; }
 #logBox {
   background:#0c1015; border:1px solid var(--line); border-radius:8px;
-  padding:0.75rem; overflow:auto; font-size:0.72rem; max-height:280px;
-  white-space:pre-wrap; word-break:break-word; color:#b7c4d1; margin-top:0.5rem;
+  padding:0.75rem; overflow:auto; font-size:0.72rem;
+  flex: 1 1 auto; min-height: 220px;
+  white-space:pre-wrap; word-break:break-word; color:#b7c4d1; margin:0;
 }
-.cfg {
-  margin-top:0.75rem; border-top:1px solid var(--line); padding-top:0.75rem;
-  font-size:0.78rem;
-}
-.cfg h3 { margin:0 0 0.5rem; font-size:0.9rem; color:var(--muted); }
+.cfg { font-size:0.78rem; }
 .cfg label { display:block; color:var(--muted); margin:0.35rem 0 0.15rem; }
 .cfg input, .cfg select {
   width:100%; background:#0c1015; color:var(--text); border:1px solid var(--line);
@@ -139,64 +160,104 @@ pre {
 .cfg .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0.4rem; }
 .cfg details { margin-top:0.5rem; }
 .cfg summary { cursor:pointer; color:var(--accent); }
+header .lang {
+  display:flex; align-items:center; gap:0.5rem; color:var(--muted); font-size:0.9rem;
+}
+header .lang select {
+  background:#0c1015; color:var(--text); border:1px solid var(--line);
+  border-radius:6px; padding:0.35rem 0.55rem; font:inherit;
+}
+#actions .empty { color:var(--muted); font-size:0.85rem; }
 </style>
 </head>
 <body>
 <header>
   <div>
-    <h1>AVM GPU 引导</h1>
-    <div class="sub">CUDA 热路径 · WebRTC 推流</div>
+    <h1 data-i18n="title">AVM GPU 引导</h1>
+    <div class="sub" data-i18n="subtitle">CUDA 热路径 · WebRTC 推流</div>
   </div>
-  <div class="sub" id="cudaLine">cuda…</div>
+  <div class="lang">
+    <label for="langSelect" data-i18n="lang_label">语言</label>
+    <select id="langSelect" onchange="setLang(this.value)">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
+  </div>
 </header>
 <main>
-  <section class="panel">
+  <section class="panel panel-left">
     <div class="steps">
       <div class="step active" data-step="status" onclick="selectStep('status')">
-        <h3>0. 状态检查</h3>
-        <p>CUDA / 内参 / 外参质量</p>
+        <h3 data-i18n="step_status_h">0. 状态检查</h3>
+        <p data-i18n="step_status_p">CUDA / 内参 / 外参质量</p>
       </div>
       <div class="step" data-step="intrinsics" onclick="selectStep('intrinsics')">
-        <h3>1. 内参标定</h3>
-        <p>WebRTC 推流 · SPACE 抓拍</p>
+        <h3 data-i18n="step_intr_h">1. 内参标定</h3>
+        <p data-i18n="step_intr_p">WebRTC · SPACE 抓拍</p>
       </div>
       <div class="step" data-step="extrinsics" onclick="selectStep('extrinsics')">
-        <h3>2. 外参标定</h3>
-        <p>WebRTC · 稳定后连拍均值</p>
+        <h3 data-i18n="step_ext_h">2. 外参标定</h3>
+        <p data-i18n="step_ext_p">稳定后自动锁定 · 连拍均值</p>
       </div>
       <div class="step" data-step="seam" onclick="selectStep('seam')">
-        <h3>2b. 接缝精修</h3>
-        <p>重叠区放板 · 微调从路 H</p>
+        <h3 data-i18n="step_seam_h">2b. 接缝精修</h3>
+        <p data-i18n="step_seam_p">重叠区放板 · 自动精修从路</p>
       </div>
       <div class="step" data-step="preview" onclick="selectStep('preview')">
-        <h3>3. 去畸变预览</h3>
-        <p>GPU undistort · WebRTC</p>
+        <h3 data-i18n="step_prev_h">3. 去畸变预览</h3>
+        <p data-i18n="step_prev_p">GPU undistort · WebRTC</p>
       </div>
       <div class="step" data-step="bev" onclick="selectStep('bev')">
-        <h3>4. 实时 BEV</h3>
-        <p>GPU stitch · WebRTC</p>
+        <h3 data-i18n="step_bev_h">4. 实时 BEV</h3>
+        <p data-i18n="step_bev_p">GPU stitch · WebRTC</p>
       </div>
     </div>
+    <p class="note" data-i18n="side_note">点左侧切换步骤；中间按钮开/关推流。步骤操作在视频下方。</p>
+    <div class="report-wrap">
+      <h3 class="side-h" data-i18n="report_title">状态报告</h3>
+      <pre id="report">…</pre>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div id="streamWrap">
+      <video id="video" autoplay playsinline muted></video>
+      <div id="streamPlaceholder" data-i18n="stream_offline">stream offline</div>
+    </div>
+    <div class="meta">
+      <span class="badge" id="modeBadge">mode: idle</span>
+      <span class="badge" id="fpsBadge">fps: —</span>
+      <span class="badge" id="gpuBadge">gpu: —</span>
+      <span class="badge" id="peerBadge">webrtc: 0</span>
+      <span class="badge" id="cudaBadge">cuda</span>
+    </div>
+    <div class="row" style="align-items:center">
+      <button id="streamToggle" class="primary" onclick="toggleStream()" data-i18n="btn_start">开始推流</button>
+      <button onclick="refresh()" data-i18n="btn_refresh">刷新状态</button>
+    </div>
     <div class="row" id="actions"></div>
-    <p class="note">外参完成后可用「接缝精修」：在两路重叠区放板，锁参考路、微调从路 H，修正卷尺 near_m 误差。</p>
+    <p class="note" id="streamHint" style="margin-top:0.5rem"></p>
+  </section>
+
+  <section class="panel panel-right">
     <div class="cfg">
-      <h3>标定配置（写回 config/*.json）</h3>
+      <h3 class="side-h" data-i18n="cfg_title">标定配置（写回 config/*.json）</h3>
       <div class="grid2">
-        <div><label>棋盘列×行（内角点）</label>
+        <div><label data-i18n="cfg_pattern">棋盘列×行（内角点）</label>
           <div class="grid2">
             <input id="cfg_cols" type="number" min="2" step="1"/>
             <input id="cfg_rows" type="number" min="2" step="1"/>
           </div>
         </div>
-        <div><label>格宽 square_size_m</label>
+        <div><label data-i18n="cfg_square">格宽 square_size_m</label>
           <input id="cfg_square" type="number" min="0.001" step="0.001"/>
         </div>
       </div>
       <div class="grid2">
-        <div><label>检测分辨率宽度（每次都使用）</label>
+        <div><label data-i18n="cfg_detect_w">检测分辨率宽度</label>
           <input id="cfg_detect_w" type="number" min="320" step="160"/>
         </div>
-        <div><label>检测 interval_ms / CPU占空比</label>
+        <div><label data-i18n="cfg_interval">interval_ms / CPU占空比</label>
           <div class="grid2">
             <input id="cfg_detect_iv" type="number" min="50" step="50"/>
             <input id="cfg_detect_duty" type="number" min="0.05" max="1" step="0.05"/>
@@ -212,12 +273,12 @@ pre {
         </div>
       </div>
       <div class="grid2">
-        <div><label>stable_frames / 自动锁定</label>
+        <div><label data-i18n="cfg_stable">stable_frames / 自动锁定</label>
           <div class="grid2">
             <input id="cfg_stable" type="number" min="1" step="1"/>
             <select id="cfg_autolock">
-              <option value="1">自动锁定</option>
-              <option value="0">手动 SPACE</option>
+              <option value="1" data-i18n="opt_autolock">自动锁定</option>
+              <option value="0" data-i18n="opt_manual">手动 SPACE</option>
             </select>
           </div>
         </div>
@@ -229,48 +290,52 @@ pre {
         </div>
       </div>
       <div class="grid2">
-        <div><label>内参 min / target 张数</label>
+        <div><label data-i18n="cfg_intr_n">内参 min / target 张数</label>
           <div class="grid2">
             <input id="cfg_imin" type="number" min="3" step="1"/>
             <input id="cfg_itarget" type="number" min="3" step="1"/>
           </div>
         </div>
       </div>
+      <details open>
+        <summary data-i18n="cfg_cam_title">相机设备 / 分辨率</summary>
+        <div class="grid2">
+          <div><label data-i18n="cfg_cam_wh">采集 width × height</label>
+            <div class="grid2">
+              <input id="cfg_cam_w" type="number" min="160" step="16"/>
+              <input id="cfg_cam_h" type="number" min="120" step="16"/>
+            </div>
+          </div>
+          <div><label data-i18n="cfg_cam_fourcc">fourcc / backend</label>
+            <div class="grid2">
+              <input id="cfg_cam_fourcc" type="text" placeholder="YUYV"/>
+              <select id="cfg_cam_backend">
+                <option value="v4l2">v4l2</option>
+                <option value="gstreamer">gstreamer</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="grid2" id="cfg_cam_devs"></div>
+        <p class="note" data-i18n="cfg_cam_hint">改分辨率后需重做内参/外参。保存后可在状态页 Probe。</p>
+      </details>
       <details>
-        <summary>外参 near_m / lateral_m（四路）</summary>
+        <summary data-i18n="cfg_places">外参 near_m / lateral_m（四路）</summary>
         <div class="grid2" id="cfg_places"></div>
       </details>
       <div class="row">
-        <button class="primary" onclick="saveConfig()">保存配置</button>
-        <button onclick="loadConfig()">重新加载</button>
+        <button class="primary" onclick="saveConfig()" data-i18n="btn_save_cfg">保存配置</button>
+        <button onclick="loadConfig()" data-i18n="btn_reload_cfg">重新加载</button>
       </div>
-      <p class="note" id="cfgHint" style="margin-top:0.4rem">改配置后请重新点「开始内参/外参推流」生效。</p>
+      <p class="note" id="cfgHint" style="margin-top:0.4rem" data-i18n="cfg_hint">改配置后请重新开始对应推流生效。</p>
     </div>
-    <h3 style="margin:1rem 0 0.4rem;font-size:0.9rem;color:var(--muted)">状态报告</h3>
-    <pre id="report">加载中…</pre>
-    <h3 style="margin:1rem 0 0.4rem;font-size:0.9rem;color:var(--muted)">运行日志（前端+服务端）</h3>
-    <div id="logBox">等待操作…</div>
-  </section>
-  <section class="panel">
-    <div id="streamWrap">
-      <video id="video" autoplay playsinline muted></video>
-      <div id="streamPlaceholder">stream offline</div>
+    <div class="log-wrap">
+      <h3 class="side-h">
+        <span data-i18n="log_title">运行日志（前端+服务端）</span>
+        <button type="button" onclick="clearLog()" data-i18n="btn_clear_log">清空日志</button>
+      </h3>
+      <div id="logBox">…</div>
     </div>
-    <div class="meta">
-      <span class="badge" id="modeBadge">mode: idle</span>
-      <span class="badge" id="fpsBadge">fps: —</span>
-      <span class="badge" id="gpuBadge">gpu: —</span>
-      <span class="badge" id="peerBadge">webrtc: 0</span>
-      <span class="badge" id="cudaBadge">cuda</span>
-    </div>
-    <div class="row">
-      <button class="primary" onclick="startStream('preview')">GPU 预览流</button>
-      <button class="primary" onclick="startStream('bev')">GPU BEV 流</button>
-      <button onclick="stopAll()">停止推流</button>
-      <button onclick="refresh()">刷新状态</button>
-      <button onclick="clearLog()">清空日志</button>
-    </div>
-    <p class="note" id="streamHint" style="margin-top:0.5rem"></p>
   </section>
 </main>
 <script>
@@ -278,46 +343,264 @@ let currentStep = 'status';
 let pc = null;
 let clientLogs = [];
 let busy = false;
+let lang = localStorage.getItem('avm_lang') || 'zh';
+let lastStreaming = false;
 
-const actions = {
-  status: [
-    ['跳过内参', "skip('intrinsics')"],
-    ['加载配置', "loadConfig()"],
-  ],
-  intrinsics: [
-    ['开始内参推流', "startCalib('intrinsics')"],
-    ['跳过步骤', "skip('intrinsics')"],
-    ['SPACE 抓拍', "calibCmd('space')"],
-    ['ESC 完成本路', "calibCmd('esc')"],
-    ['跳过本路相机', "calibCmd('skip')"],
-  ],
-  extrinsics: [
-    ['开始外参推流', "startCalib('extrinsics')"],
-    ['跳过步骤', "skip('extrinsics')"],
-    ['标 front', "calibCmd('target:front')"],
-    ['标 back', "calibCmd('target:back')"],
-    ['标 left', "calibCmd('target:left')"],
-    ['标 right', "calibCmd('target:right')"],
-    ['下一路', "calibCmd('next')"],
-    ['重标当前路', "calibCmd('relock')"],
-    ['SPACE 锁定READY', "calibCmd('space')"],
-    ['ESC 保存外参', "calibCmd('esc')"],
-    ['解锁全部', "calibCmd('unlock_all')"],
-  ],
-  seam: [
-    ['开始接缝精修', "startCalib('seam')"],
-    ['下一对', "calibCmd('next_pair')"],
-    ['交换 ref/slave', "calibCmd('swap')"],
-    ['front+left', "calibCmd('pair:front,left')"],
-    ['front+right', "calibCmd('pair:front,right')"],
-    ['back+left', "calibCmd('pair:back,left')"],
-    ['back+right', "calibCmd('pair:back,right')"],
-    ['SPACE 精修从路', "calibCmd('space')"],
-    ['ESC 写回外参', "calibCmd('esc')"],
-  ],
-  preview: [],
-  bev: [],
+const I18N = {
+  zh: {
+    title: 'AVM GPU 引导',
+    subtitle: 'CUDA 热路径 · WebRTC 推流',
+    lang_label: '语言',
+    step_status_h: '0. 状态检查',
+    step_status_p: 'CUDA / 内参 / 外参质量',
+    step_intr_h: '1. 内参标定',
+    step_intr_p: 'WebRTC · SPACE 抓拍',
+    step_ext_h: '2. 外参标定',
+    step_ext_p: '稳定后自动锁定 · 连拍均值',
+    step_seam_h: '2b. 接缝精修',
+    step_seam_p: '重叠区放板 · 自动精修从路',
+    step_prev_h: '3. 去畸变预览',
+    step_prev_p: 'GPU undistort · WebRTC',
+    step_bev_h: '4. 实时 BEV',
+    step_bev_p: 'GPU stitch · WebRTC',
+    stream_ctrl: '推流控制',
+    btn_preview: 'GPU 预览流',
+    btn_bev: 'GPU BEV 流',
+    btn_start: '开始推流',
+    btn_starting: '启动中…',
+    btn_stop: '停止推流',
+    btn_refresh: '刷新状态',
+    btn_clear_log: '清空日志',
+    side_note: '点左侧切换步骤；中间按钮开/关推流。步骤操作在视频下方。',
+    stream_offline: 'stream offline',
+    cfg_title: '标定配置（写回 config/*.json）',
+    cfg_pattern: '棋盘列×行（内角点）',
+    cfg_square: '格宽 square_size_m',
+    cfg_detect_w: '检测分辨率宽度',
+    cfg_interval: 'interval_ms / CPU占空比',
+    cfg_stable: 'stable_frames / 自动锁定',
+    opt_autolock: '自动锁定',
+    opt_manual: '手动 SPACE',
+    cfg_intr_n: '内参 min / target 张数',
+    cfg_places: '外参 near_m / lateral_m（四路）',
+    cfg_cam_title: '相机设备 / 分辨率',
+    cfg_cam_wh: '采集 width × height',
+    cfg_cam_fourcc: 'fourcc / backend',
+    cfg_cam_hint: '改分辨率后需重做内参/外参。保存后可在状态页 Probe。',
+    btn_save_cfg: '保存配置',
+    btn_reload_cfg: '重新加载',
+    cfg_hint: '改配置后请重新开始对应推流生效。',
+    report_title: '状态报告',
+    loading: '加载中…',
+    log_title: '运行日志（前端+服务端）',
+    log_wait: '等待操作…',
+    act_refresh: '刷新状态报告',
+    act_load_cfg: '加载配置',
+    act_probe: 'Probe 相机',
+    act_smoke: 'Smoke 开流',
+    act_start_intr: '开始内参推流',
+    act_space: 'SPACE 抓拍',
+    act_finish_cam: '完成本路',
+    act_skip_cam: '跳过本路相机',
+    act_start_ext: '开始外参推流',
+    act_target_front: '标 front',
+    act_target_back: '标 back',
+    act_target_left: '标 left',
+    act_target_right: '标 right',
+    act_relock: '重标当前路',
+    act_unlock: '解锁全部',
+    act_save_params: '保存标定参数',
+    act_start_seam: '开始接缝精修',
+    act_swap: '交换 ref/slave',
+    act_edit_ext: '修改外参',
+    act_start_prev: '开始去畸变预览',
+    act_start_bev: '开始实时 BEV',
+    empty_actions: '本步骤无额外操作',
+    cfg_loaded: '配置已加载自磁盘',
+    cfg_saved: '已保存',
+    cfg_restart: '。请重新开始推流。',
+    cuda_off: 'CUDA OFF',
+    cuda_not_pipe: 'CUDA 未进管道',
+    cuda_streaming: 'CUDA 推流中',
+    cuda_ready: 'CUDA 就绪',
+    err_stream: '推流错误: ',
+    hint_no_ext: '外参缺失：BEV 不可用。可先开「GPU 预览流」。',
+    hint_idle: '选好左侧步骤后，点中间「开始推流」。再点一次可停止。',
+    hint_no_backend: '无法连接后端 /api/status。请在板子上启动: ./scripts/run_web.sh --host 0.0.0.0 --port 8787',
+    refresh_fail: '刷新失败: ',
+    waiting_server: '等待服务器（开相机 / WebRTC）…',
+    busy_ignore: '已有启动进行中，忽略重复点击',
+    start_fail: '启动失败: ',
+    timeout: '请求超时（服务无响应或开相机卡住）',
+    page_loaded: '页面加载 ',
+  },
+  en: {
+    title: 'AVM GPU Guide',
+    subtitle: 'CUDA hot path · WebRTC stream',
+    lang_label: 'Language',
+    step_status_h: '0. Status',
+    step_status_p: 'CUDA / intrinsics / extrinsics QC',
+    step_intr_h: '1. Intrinsics',
+    step_intr_p: 'WebRTC · SPACE capture',
+    step_ext_h: '2. Extrinsics',
+    step_ext_p: 'Auto-lock when stable · burst average',
+    step_seam_h: '2b. Seam refine',
+    step_seam_p: 'Overlap board · auto-refine slave H',
+    step_prev_h: '3. Undistort preview',
+    step_prev_p: 'GPU undistort · WebRTC',
+    step_bev_h: '4. Live BEV',
+    step_bev_p: 'GPU stitch · WebRTC',
+    stream_ctrl: 'Stream controls',
+    btn_preview: 'GPU preview',
+    btn_bev: 'GPU BEV',
+    btn_start: 'Start stream',
+    btn_starting: 'Starting…',
+    btn_stop: 'Stop stream',
+    btn_refresh: 'Refresh',
+    btn_clear_log: 'Clear log',
+    side_note: 'Left steps switch mode; center button starts/stops the stream. Step actions are under the video.',
+    stream_offline: 'stream offline',
+    cfg_title: 'Calibration config (writes config/*.json)',
+    cfg_pattern: 'Board cols×rows (inner corners)',
+    cfg_square: 'square_size_m',
+    cfg_detect_w: 'Detect width',
+    cfg_interval: 'interval_ms / CPU duty',
+    cfg_stable: 'stable_frames / auto-lock',
+    opt_autolock: 'Auto-lock',
+    opt_manual: 'Manual SPACE',
+    cfg_intr_n: 'Intrinsics min / target frames',
+    cfg_places: 'Extrinsic near_m / lateral_m (4 cams)',
+    cfg_cam_title: 'Cameras / resolution',
+    cfg_cam_wh: 'Capture width × height',
+    cfg_cam_fourcc: 'fourcc / backend',
+    cfg_cam_hint: 'Changing resolution requires re-calibration. Save then Probe on Status.',
+    btn_save_cfg: 'Save config',
+    btn_reload_cfg: 'Reload',
+    cfg_hint: 'Restart the matching stream after changing config.',
+    report_title: 'Status report',
+    loading: 'Loading…',
+    log_title: 'Runtime log (UI + server)',
+    log_wait: 'Waiting…',
+    act_refresh: 'Refresh report',
+    act_load_cfg: 'Load config',
+    act_probe: 'Probe cameras',
+    act_smoke: 'Smoke stream',
+    act_start_intr: 'Start intrinsics',
+    act_space: 'SPACE capture',
+    act_finish_cam: 'Finish camera',
+    act_skip_cam: 'Skip camera',
+    act_start_ext: 'Start extrinsics',
+    act_target_front: 'Calib front',
+    act_target_back: 'Calib back',
+    act_target_left: 'Calib left',
+    act_target_right: 'Calib right',
+    act_relock: 'Relock current',
+    act_unlock: 'Unlock all',
+    act_save_params: 'Save calibration',
+    act_start_seam: 'Start seam refine',
+    act_swap: 'Swap ref/slave',
+    act_edit_ext: 'Write extrinsics',
+    act_start_prev: 'Start undistort preview',
+    act_start_bev: 'Start live BEV',
+    empty_actions: 'No extra actions for this step',
+    cfg_loaded: 'Config loaded from disk',
+    cfg_saved: 'Saved',
+    cfg_restart: '. Restart stream to apply.',
+    cuda_off: 'CUDA OFF',
+    cuda_not_pipe: 'CUDA not in pipeline',
+    cuda_streaming: 'CUDA streaming',
+    cuda_ready: 'CUDA ready',
+    err_stream: 'Stream error: ',
+    hint_no_ext: 'Extrinsics missing: BEV unavailable. Try GPU preview first.',
+    hint_idle: 'Pick a left step, then Start stream in the center. Click again to stop.',
+    hint_no_backend: 'Cannot reach /api/status. Start: ./scripts/run_web.sh --host 0.0.0.0 --port 8787',
+    refresh_fail: 'Refresh failed: ',
+    waiting_server: 'Waiting for server (opening cameras / WebRTC)…',
+    busy_ignore: 'Start already in progress, ignoring click',
+    start_fail: 'Start failed: ',
+    timeout: 'Request timed out (server hung or camera open stuck)',
+    page_loaded: 'Page loaded ',
+  },
 };
+
+function t(key) {
+  return (I18N[lang] && I18N[lang][key]) || (I18N.zh[key]) || key;
+}
+
+function buildActions() {
+  return {
+    status: [
+      [t('act_refresh'), "refresh()"],
+      [t('act_load_cfg'), "loadConfig()"],
+      [t('act_probe'), "probeCameras()"],
+      [t('act_smoke'), "smokeStream()"],
+    ],
+    intrinsics: [
+      [t('act_space'), "calibCmd('space')"],
+      [t('act_finish_cam'), "calibCmd('esc')"],
+      [t('act_skip_cam'), "calibCmd('skip')"],
+    ],
+    extrinsics: [
+      [t('act_target_front'), "calibCmd('target:front')"],
+      [t('act_target_back'), "calibCmd('target:back')"],
+      [t('act_target_left'), "calibCmd('target:left')"],
+      [t('act_target_right'), "calibCmd('target:right')"],
+      [t('act_relock'), "calibCmd('relock')"],
+      [t('act_unlock'), "calibCmd('unlock_all')"],
+      [t('act_save_params'), "calibCmd('esc')"],
+    ],
+    seam: [
+      [t('act_swap'), "calibCmd('swap')"],
+      ['front+left', "calibCmd('pair:front,left')"],
+      ['front+right', "calibCmd('pair:front,right')"],
+      ['back+left', "calibCmd('pair:back,left')"],
+      ['back+right', "calibCmd('pair:back,right')"],
+      [t('act_edit_ext'), "calibCmd('esc')"],
+    ],
+    preview: [],
+    bev: [],
+  };
+}
+
+let actions = buildActions();
+
+function applyLang() {
+  document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    if (el.id === 'cfgHint' || el.id === 'streamToggle') return;
+    const key = el.getAttribute('data-i18n');
+    if (!key) return;
+    el.textContent = t(key);
+  });
+  const sel = document.getElementById('langSelect');
+  if (sel) sel.value = lang;
+  actions = buildActions();
+  renderStepActions();
+  updateStreamToggle(lastStreaming);
+  const hint = document.getElementById('cfgHint');
+  if (hint && (!hint.textContent || hint.hasAttribute('data-i18n'))) {
+    hint.textContent = t('cfg_hint');
+  }
+}
+
+function setLang(next) {
+  lang = (next === 'en') ? 'en' : 'zh';
+  localStorage.setItem('avm_lang', lang);
+  applyLang();
+  log(lang === 'en' ? 'Language: English' : '语言: 中文');
+}
+
+function renderStepActions() {
+  const box = document.getElementById('actions');
+  if (!box) return;
+  const list = actions[currentStep] || [];
+  box.innerHTML = list.length
+    ? list.map(([label, fn]) => {
+        const primary = /开始|保存|修改|Start|Save|Write/.test(label) ? ' class="primary"' : '';
+        return `<button${primary} onclick="${fn}">${label}</button>`;
+      }).join('')
+    : `<span class="empty">${t('empty_actions')}</span>`;
+}
 
 function fillPlaces(placements) {
   const box = document.getElementById('cfg_places');
@@ -332,6 +615,26 @@ function fillPlaces(placements) {
       </div>
     </div>`;
   }).join('');
+}
+
+function fillCameras(profile) {
+  const box = document.getElementById('cfg_cam_devs');
+  if (!box) return;
+  const dirs = ['front','back','left','right'];
+  const cams = (profile && profile.cameras) || {};
+  box.innerHTML = dirs.map(d => {
+    const c = cams[d] || {};
+    return `<div>
+      <label>${d} device /dev/video</label>
+      <input id="cfg_cam_${d}" type="number" min="0" step="1" value="${c.device ?? 0}"/>
+    </div>`;
+  }).join('');
+  if (profile) {
+    document.getElementById('cfg_cam_w').value = profile.width ?? 1920;
+    document.getElementById('cfg_cam_h').value = profile.height ?? 1536;
+    document.getElementById('cfg_cam_fourcc').value = profile.fourcc ?? 'YUYV';
+    document.getElementById('cfg_cam_backend').value = profile.backend ?? 'v4l2';
+  }
 }
 
 async function loadConfig() {
@@ -355,8 +658,9 @@ async function loadConfig() {
     document.getElementById('cfg_itarget').value = s.intrinsics_target_frames ?? 25;
     document.getElementById('cfg_scale').value = s.scale_px_per_m ?? 100;
     fillPlaces(j.placements || {});
-    document.getElementById('cfgHint').textContent = '配置已加载自磁盘';
-    log('配置已加载');
+    fillCameras(j.camera_profile || {});
+    document.getElementById('cfgHint').textContent = t('cfg_loaded');
+    log(t('cfg_loaded'));
   } catch (e) {
     log('loadConfig: ' + e.message, 'ERROR');
   }
@@ -372,6 +676,12 @@ async function saveConfig() {
       orient: 'long-lateral',
     };
   });
+  const cameras = {};
+  dirs.forEach(d => {
+    cameras[d] = {
+      device: parseInt(document.getElementById('cfg_cam_'+d).value, 10),
+    };
+  });
   const body = {
     chessboard: {
       pattern_cols: parseInt(document.getElementById('cfg_cols').value, 10),
@@ -379,6 +689,13 @@ async function saveConfig() {
       square_size_m: parseFloat(document.getElementById('cfg_square').value),
     },
     placements,
+    camera_profile: {
+      width: parseInt(document.getElementById('cfg_cam_w').value, 10),
+      height: parseInt(document.getElementById('cfg_cam_h').value, 10),
+      fourcc: (document.getElementById('cfg_cam_fourcc').value || 'YUYV').trim(),
+      backend: document.getElementById('cfg_cam_backend').value || 'v4l2',
+      cameras,
+    },
     settings: {
       detect_max_width: parseInt(document.getElementById('cfg_detect_w').value, 10),
       detect_interval_ms: parseInt(document.getElementById('cfg_detect_iv').value, 10),
@@ -401,12 +718,41 @@ async function saveConfig() {
     }, 10000);
     if (!r.ok) throw new Error(j.error || 'save failed');
     document.getElementById('cfgHint').textContent =
-      '已保存: ' + (j.changed || []).join(', ') + '。请重新开始推流。';
-    log('配置已保存 ' + JSON.stringify(j.changed));
+      t('cfg_saved') + ': ' + (j.changed || []).join(', ') + t('cfg_restart');
+    log(t('cfg_saved') + ' ' + JSON.stringify(j.changed));
   } catch (e) {
     log('saveConfig: ' + e.message, 'ERROR');
     alert(e.message);
   }
+}
+
+async function probeCameras() {
+  log('probe cameras…');
+  try {
+    if (lastStreaming) await stopAll();
+    const { r, j } = await fetchJSON('/api/cameras/probe', {method:'POST'}, 60000);
+    if (!r.ok) throw new Error(j.error || ('probe HTTP ' + r.status));
+    log('probe ok=' + j.ok + ' ' + JSON.stringify(j.cameras));
+    if (!j.ok) alert('Probe FAIL — see status report');
+  } catch (e) {
+    log('probe: ' + e.message, 'ERROR');
+    alert(e.message);
+  }
+  refresh();
+}
+
+async function smokeStream() {
+  log('smoke stream…');
+  try {
+    if (lastStreaming) await stopAll();
+    const { r, j } = await fetchJSON('/api/stream/smoke', {method:'POST'}, 60000);
+    if (!r.ok) throw new Error(j.error || ('smoke HTTP ' + r.status));
+    log('smoke ok=' + j.ok + ' ' + JSON.stringify(j.stream || {}));
+  } catch (e) {
+    log('smoke: ' + e.message, 'ERROR');
+    alert(e.message);
+  }
+  refresh();
 }
 
 function ts() {
@@ -431,18 +777,15 @@ function renderLog(serverLines) {
   box.scrollTop = box.scrollHeight;
 }
 
-function selectStep(step) {
+function selectStep(step, opts) {
   currentStep = step;
   document.querySelectorAll('.step').forEach(el => {
     el.classList.toggle('active', el.dataset.step === step);
   });
-  const box = document.getElementById('actions');
-  const list = actions[step] || [];
-  box.innerHTML = list.length
-    ? list.map(([label, fn]) => `<button onclick="${fn}">${label}</button>`).join('')
-    : '<span style="color:var(--muted);font-size:0.85rem">推流请用右侧按钮</span>';
+  renderStepActions();
   fetch('/api/step', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({step})}).catch(()=>{});
+  // 只切换步骤 UI，不自动开流；开/关推流用侧栏或视频下按钮
 }
 
 function setPlaceholder(show, text) {
@@ -468,10 +811,14 @@ async function fetchJSON(url, opts={}, timeoutMs=45000) {
 }
 
 async function refresh() {
+  // 开流期间 status 常被占满 → AbortError，不要打成 ERROR
+  if (busy) {
+    updateStreamToggle(lastStreaming);
+    return;
+  }
   try {
-    const { r, j } = await fetchJSON('/api/status', {}, 8000);
-    if (!r.ok) { log('status HTTP ' + r.status, 'ERROR'); return; }
-    document.getElementById('cudaLine').textContent = j.cuda_line || '';
+    const { r, j } = await fetchJSON('/api/status?lang=' + encodeURIComponent(lang), {}, 8000);
+    if (!r.ok) { log('status HTTP ' + r.status, 'WARN'); return; }
     document.getElementById('report').textContent = j.report_text || JSON.stringify(j, null, 2);
     renderLog(j.logs || []);
     const s = j.stream || {};
@@ -482,23 +829,76 @@ async function refresh() {
     document.getElementById('peerBadge').textContent = 'webrtc: ' + (w.peers ?? 0);
     const cb = document.getElementById('cudaBadge');
     const cudaOk = !!(j.cuda || s.cuda);
-    const streaming = s.mode && s.mode !== 'idle';
-    if (!cudaOk) { cb.textContent = 'CUDA OFF'; cb.className = 'badge bad'; }
-    else if (streaming && s.pipeline_cuda === false) { cb.textContent = 'CUDA 未进管道'; cb.className = 'badge bad'; }
-    else if (streaming) { cb.textContent = 'CUDA 推流中'; cb.className = 'badge ok'; }
-    else { cb.textContent = 'CUDA 就绪'; cb.className = 'badge ok'; }
+    const streaming = !!(s.mode && s.mode !== 'idle');
+    lastStreaming = streaming;
+    if (!cudaOk) { cb.textContent = t('cuda_off'); cb.className = 'badge bad'; }
+    else if (streaming && s.pipeline_cuda === false) { cb.textContent = t('cuda_not_pipe'); cb.className = 'badge bad'; }
+    else if (streaming) { cb.textContent = t('cuda_streaming'); cb.className = 'badge ok'; }
+    else { cb.textContent = t('cuda_ready'); cb.className = 'badge ok'; }
+    updateStreamToggle(streaming);
     const hint = document.getElementById('streamHint');
-    if (s.error) hint.textContent = '推流错误: ' + s.error;
+    if (s.error) hint.textContent = t('err_stream') + s.error;
     else if ((j.extrinsics || {}).status === 'fail')
-      hint.textContent = '外参缺失：BEV 不可用。可先开「GPU 预览流」。';
+      hint.textContent = t('hint_no_ext');
     else if (!streaming)
-      hint.textContent = '点「GPU 预览流」→ 自动 WebRTC。若卡住请看左侧日志。';
+      hint.textContent = t('hint_idle');
     else hint.textContent = '';
   } catch (e) {
-    log('刷新失败: ' + e.message + '（服务是否在跑？ ./scripts/run_web.sh）', 'ERROR');
-    document.getElementById('streamHint').textContent =
-      '无法连接后端 /api/status。请在板子上启动: ./scripts/run_web.sh --host 0.0.0.0 --port 8787';
+    const msg = (e && e.message) || String(e);
+    const soft = (e && e.name === 'AbortError')
+      || /aborted|timeout|Failed to fetch|NetworkError/i.test(msg);
+    if (soft) {
+      log(t('waiting_server'), 'INFO');
+      return;
+    }
+    log(t('refresh_fail') + msg, 'ERROR');
+    document.getElementById('streamHint').textContent = t('hint_no_backend');
   }
+}
+
+function streamModeForStep() {
+  return ({
+    status: 'preview',
+    preview: 'preview',
+    bev: 'bev',
+    intrinsics: 'calib_intrinsics',
+    extrinsics: 'calib_extrinsics',
+    seam: 'calib_seam',
+  })[currentStep] || 'preview';
+}
+
+function updateStreamToggle(streaming) {
+  const btn = document.getElementById('streamToggle');
+  if (!btn) return;
+  if (busy) {
+    btn.textContent = t('btn_starting');
+    btn.className = 'primary';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+    btn.disabled = true;
+    return;
+  }
+  btn.disabled = false;
+  if (streaming) {
+    btn.textContent = t('btn_stop');
+    btn.className = '';
+    btn.style.borderColor = 'var(--bad)';
+    btn.style.color = 'var(--bad)';
+  } else {
+    btn.textContent = t('btn_start');
+    btn.className = 'primary';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+  }
+}
+
+async function toggleStream() {
+  if (busy) { log(t('busy_ignore'), 'WARN'); return; }
+  if (lastStreaming) {
+    await stopAll();
+    return;
+  }
+  await startStream(streamModeForStep());
 }
 
 function waitIce(pc) {
@@ -554,45 +954,65 @@ async function connectWebRTC() {
 }
 
 async function startStream(mode) {
-  if (busy) { log('已有启动进行中，忽略重复点击', 'WARN'); return; }
+  if (busy) { log(t('busy_ignore'), 'WARN'); return; }
   busy = true;
+  updateStreamToggle(false);
   setPlaceholder(true, 'starting…');
-  log('点击启动 mode=' + mode);
+  log('start mode=' + mode);
   try {
-    log('POST /api/stream/start …（打开相机可能要几秒）');
+    log('POST /api/stream/start …');
     setPlaceholder(true, 'opening cameras…');
     const { r, j } = await fetchJSON('/api/stream/start?mode=' + mode, {method:'POST'}, 60000);
     if (!r.ok) throw new Error(j.error || ('start HTTP ' + r.status));
     log('hub started: mode=' + ((j.stream||{}).mode) + ' cameras=' + JSON.stringify((j.stream||{}).cameras));
     setPlaceholder(true, 'webrtc negotiating…');
     await connectWebRTC();
-    selectStep(mode === 'bev' ? 'bev' : 'preview');
+    const stepForMode = {
+      preview: 'preview',
+      bev: 'bev',
+      calib_intrinsics: 'intrinsics',
+      calib_extrinsics: 'extrinsics',
+      calib_seam: 'seam',
+    };
+    selectStep(stepForMode[mode] || 'preview', {autostart: false});
     setPlaceholder(false);
-    log('启动完成');
+    lastStreaming = true;
+    log('OK');
   } catch (e) {
     const msg = (e && e.name === 'AbortError')
-      ? '请求超时（服务无响应或开相机卡住）'
+      ? t('timeout')
       : (e.message || String(e));
-    log('启动失败: ' + msg, 'ERROR');
+    const soft = (e && e.name === 'AbortError')
+      || /aborted|timeout|Failed to fetch/i.test(msg);
+    log(t('start_fail') + msg, soft ? 'WARN' : 'ERROR');
     setPlaceholder(true, 'failed');
-    alert('启动失败: ' + msg);
+    if (!soft) alert(t('start_fail') + msg);
+    lastStreaming = false;
   } finally {
     busy = false;
+    updateStreamToggle(lastStreaming);
     refresh();
   }
 }
 
 async function stopAll() {
-  log('停止推流');
+  log('stop stream');
+  busy = true;
+  updateStreamToggle(false);
   if (pc) { try { pc.close(); } catch(e) {} pc = null; }
   const v = document.getElementById('video');
   v.srcObject = null;
   try {
     await fetchJSON('/api/stream/stop', {method:'POST'}, 10000);
   } catch (e) {
-    log('stop 请求失败: ' + e.message, 'WARN');
+    const soft = (e && e.name === 'AbortError')
+      || /aborted|timeout|Failed to fetch/i.test((e && e.message) || '');
+    log('stop: ' + ((e && e.message) || e), soft ? 'INFO' : 'WARN');
   }
-  setPlaceholder(true, 'stream offline');
+  setPlaceholder(true, t('stream_offline'));
+  lastStreaming = false;
+  busy = false;
+  updateStreamToggle(false);
   refresh();
 }
 
@@ -602,7 +1022,7 @@ async function startCalib(kind) {
     seam: 'calib_seam',
     intrinsics: 'calib_intrinsics',
   })[kind] || 'calib_intrinsics';
-  log('启动标定推流 mode=' + mode);
+  log('start calib mode=' + mode);
   await startStream(mode);
 }
 
@@ -644,8 +1064,9 @@ async function cmd(name) {
   catch (e) { log(e.message, 'ERROR'); }
 }
 
-log('页面加载 ' + location.href);
-selectStep('status');
+log(t('page_loaded') + location.href);
+applyLang();
+selectStep('status', {autostart: false});
 loadConfig();
 refresh();
 setInterval(refresh, 2000);
@@ -663,26 +1084,70 @@ def _json_bytes(obj: dict, code: int = 200) -> tuple[bytes, int, str]:
     )
 
 
-def _status_payload() -> dict:
+def _status_payload(lang: str = "en") -> dict:
+    """Status report text is English (UI chrome is separately i18n'd in the page)."""
+    from avm.camera_io import load_camera_profile, profile_for_web
+
+    _ = lang
     intr = check_intrinsics_quality(CALIB_DIR)
     extr = check_extrinsics_quality(CALIB_DIR / "extrinsics.json")
     stream = HUB.status() if HUB else {"mode": "idle"}
     webrtc = WEBRTC.status() if WEBRTC else {"peers": 0}
-    lines = [f"CUDA: {cuda_status_line()}", f"内参: {intr['status']}"]
+    prof = load_camera_profile()
+    lines = [f"CUDA: {cuda_status_line()}", f"Intrinsics: {intr['status']}"]
     for d, det in intr.get("details", {}).items():
         rms = det.get("rms")
         rms_s = f"{float(rms):.3f}" if rms is not None else "N/A"
         lines.append(f"  {d}: {det.get('status')} RMS={rms_s}")
-    lines.append(f"外参: {extr['status']}")
+        # flag image_size mismatch vs profile request
+        try:
+            cal = json.loads((CALIB_DIR / f"{d}.json").read_text(encoding="utf-8"))
+            isize = cal.get("image_size") or cal.get("img_size")
+            if isize and len(isize) >= 2:
+                req = [
+                    int((prof.get("cameras") or {}).get(d, {}).get("width") or prof["width"]),
+                    int((prof.get("cameras") or {}).get(d, {}).get("height") or prof["height"]),
+                ]
+                if [int(isize[0]), int(isize[1])] != req:
+                    lines.append(
+                        f"  ! {d} calib image_size={isize[0]}x{isize[1]} "
+                        f"!= profile {req[0]}x{req[1]} (re-calibrate)"
+                    )
+        except Exception:
+            pass
+    lines.append(f"Extrinsics: {extr['status']}")
     for d, det in extr.get("details", {}).items():
         lines.append(f"  {d}: {det.get('status')}")
     for w in extr.get("global_warnings", []):
         lines.append(f"  ! {w}")
+    lines.append(
+        f"Camera profile: {prof.get('width')}x{prof.get('height')} "
+        f"fourcc={prof.get('fourcc')} backend={prof.get('backend')}"
+    )
+    with STATE_LOCK:
+        probe = STATE.get("last_probe")
+    if probe:
+        lines.append(f"Camera probe: {'OK' if probe.get('ok') else 'FAIL'}")
+        for d, det in (probe.get("cameras") or {}).items():
+            if det.get("ok"):
+                aw = (det.get("actual_wh") or ["?", "?"])
+                lines.append(
+                    f"  {d}: OK /dev/video{det.get('device')} "
+                    f"{aw[0]}x{aw[1]} ({det.get('backend')})"
+                    + (f" !{det.get('warning')}" if det.get("warning") else "")
+                )
+            else:
+                lines.append(
+                    f"  {d}: FAIL /dev/video{det.get('device')} "
+                    f"{det.get('error')}"
+                )
+    else:
+        lines.append("Camera probe: not run (use Probe cameras)")
     lines.append(f"WebRTC peers: {webrtc.get('peers', 0)}")
     calib = (stream or {}).get("calib") or {}
     if calib.get("kind"):
         lines.append(
-            f"标定会话: {calib.get('kind')} dir={calib.get('direction')} "
+            f"Calib session: {calib.get('kind')} dir={calib.get('direction')} "
             f"captured={calib.get('captured')} locked={calib.get('locked')} "
             f"msg={calib.get('message')}"
         )
@@ -690,17 +1155,17 @@ def _status_payload() -> dict:
             tgt = calib.get("target") or "-"
             got = (calib.get("stable_streak") or {}).get(tgt, 0)
             lines.append(
-                f"  逐路标定 当前={tgt} 稳定={got}/{calib.get('stable_need')} "
-                f"待标={calib.get('pending')}"
+                f"  Sequential target={tgt} stable={got}/{calib.get('stable_need')} "
+                f"pending={calib.get('pending')}"
             )
         if calib.get("kind") == "seam":
             lines.append(
-                f"  接缝精修 ref={calib.get('seam_ref')} slave={calib.get('seam_slave')} "
+                f"  Seam refine ref={calib.get('seam_ref')} slave={calib.get('seam_slave')} "
                 f"last={calib.get('seam_last')}"
             )
     with STATE_LOCK:
         lines.append(
-            f"向导 step={STATE['step']} skip_intr={STATE['skipped_intrinsics']} "
+            f"Wizard step={STATE['step']} skip_intr={STATE['skipped_intrinsics']} "
             f"skip_extr={STATE['skipped_extrinsics']}"
         )
         if STATE.get("message"):
@@ -719,6 +1184,8 @@ def _status_payload() -> dict:
         "report_text": "\n".join(lines),
         "message": STATE.get("message", ""),
         "control_file": str(CONTROL_FILE),
+        "camera_profile": profile_for_web(prof),
+        "last_probe": probe,
     }
 
 
@@ -766,7 +1233,7 @@ def _start_calib(kind: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AVMGpuWeb/0.1.1"
+    server_version = "AVMGpuWeb/0.2.0"
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -805,7 +1272,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(HTML_PAGE.encode("utf-8"), 200, "text/html; charset=utf-8")
                 return
             if path == "/api/status":
-                body, code, ctype = _json_bytes(_status_payload())
+                qs = parse_qs(parsed.query or "")
+                lang = (qs.get("lang") or ["en"])[0]
+                body, code, ctype = _json_bytes(_status_payload(lang=lang))
                 self._send(body, code, ctype)
                 return
             if path == "/api/health":
@@ -821,6 +1290,27 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/config":
                 body, code, ctype = _json_bytes(load_all_config())
+                self._send(body, code, ctype)
+                return
+            if path == "/api/cameras/probe":
+                from avm.camera_io import probe_cameras
+
+                if HUB and HUB.mode != "idle":
+                    body, code, ctype = _json_bytes(
+                        {
+                            "ok": False,
+                            "error": "stop stream before probe",
+                            "cameras": {},
+                        },
+                        409,
+                    )
+                    self._send(body, code, ctype)
+                    return
+                result = probe_cameras()
+                with STATE_LOCK:
+                    STATE["last_probe"] = result
+                LOG.info(f"camera probe ok={result.get('ok')}")
+                body, code, ctype = _json_bytes(result)
                 self._send(body, code, ctype)
                 return
             self._send(b"not found", 404)
@@ -855,6 +1345,61 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     LOG.error(f"API config save FAIL: {exc}")
                     body, code, ctype = _json_bytes({"ok": False, "error": str(exc)}, 400)
+                self._send(body, code, ctype)
+                return
+            if path in ("/api/cameras/probe", "/api/probe"):
+                from avm.camera_io import probe_cameras
+
+                if HUB and HUB.mode != "idle":
+                    if WEBRTC:
+                        WEBRTC.close_all()
+                    HUB.stop()
+                result = probe_cameras()
+                with STATE_LOCK:
+                    STATE["last_probe"] = result
+                    STATE["message"] = (
+                        "camera probe OK" if result.get("ok") else "camera probe FAIL"
+                    )
+                LOG.info(f"camera probe ok={result.get('ok')}")
+                body, code, ctype = _json_bytes(result)
+                self._send(body, code, ctype)
+                return
+            if path == "/api/stream/smoke":
+                # Lightweight: start preview briefly without WebRTC
+                if HUB is None:
+                    body, code, ctype = _json_bytes(
+                        {"ok": False, "error": "hub not ready"}, 500
+                    )
+                    self._send(body, code, ctype)
+                    return
+                try:
+                    if HUB.mode != "idle":
+                        if WEBRTC:
+                            WEBRTC.close_all()
+                        HUB.stop()
+                    st = HUB.start("preview")
+                    time.sleep(1.5)
+                    frames_ok = False
+                    try:
+                        # one compose cycle happens in hub thread
+                        frames_ok = bool((HUB.status() or {}).get("fps") is not None)
+                    except Exception:
+                        pass
+                    HUB.stop()
+                    out = {
+                        "ok": True,
+                        "smoke": "preview",
+                        "stream": st,
+                        "frames_observed": frames_ok,
+                    }
+                    with STATE_LOCK:
+                        STATE["message"] = "stream smoke OK"
+                    body, code, ctype = _json_bytes(out)
+                except Exception as exc:
+                    LOG.error(f"stream smoke FAIL: {exc}")
+                    body, code, ctype = _json_bytes(
+                        {"ok": False, "error": str(exc)}, 400
+                    )
                 self._send(body, code, ctype)
                 return
             if path == "/api/skip":

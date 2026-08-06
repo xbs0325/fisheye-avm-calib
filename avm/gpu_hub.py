@@ -21,6 +21,11 @@ from typing import Any, Optional
 
 import numpy as np
 
+from avm.camera_io import (
+    capture_size,
+    load_camera_profile,
+    open_camera_direction,
+)
 from avm.cuda_cv import (
     UndistortWarpPipeline,
     cuda_available,
@@ -44,7 +49,8 @@ except Exception:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parents[1]
 DIRECTIONS = ("front", "back", "left", "right")
-CAPTURE_W, CAPTURE_H = 1920, 1536
+# Defaults kept for importers; runtime uses camera_profile.json
+CAPTURE_W, CAPTURE_H = capture_size()
 TILE_W, TILE_H = 480, 360
 
 
@@ -54,36 +60,21 @@ def _load_json(path: Path) -> dict:
 
 
 def open_camera(index: int, *, timeout_s: float = 8.0):
-    """Open V4L2 camera; fail fast if driver hangs."""
-    box: dict[str, Any] = {}
+    """Open V4L2 camera by index using current profile size/fourcc."""
+    from avm.camera_io import open_camera_index
 
-    def _run() -> None:
-        try:
-            cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-            if not cap.isOpened():
-                cap = cv2.VideoCapture(index)
-            if not cap.isOpened():
-                raise RuntimeError(f"无法打开 /dev/video{index}")
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_W)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_H)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            for _ in range(3):
-                cap.grab()
-            box["cap"] = cap
-        except Exception as exc:  # noqa: BLE001
-            box["err"] = exc
-
-    t = threading.Thread(target=_run, name=f"open-cam-{index}", daemon=True)
-    t.start()
-    t.join(timeout=float(timeout_s))
-    if t.is_alive():
-        raise TimeoutError(
-            f"/dev/video{index} 打开超时 ({timeout_s:.0f}s)，可能被占用或驱动卡住"
-        )
-    if "err" in box:
-        raise box["err"]
-    return box["cap"]
+    prof = load_camera_profile()
+    w, h = capture_size(prof)
+    cap, _aw, _ah, _backend = open_camera_index(
+        int(index),
+        width=w,
+        height=h,
+        fourcc=str(prof.get("fourcc") or "YUYV"),
+        backend=str(prof.get("backend") or "v4l2"),
+        gst_template=str(prof.get("gst_pipeline_template") or ""),
+        timeout_s=timeout_s,
+    )
+    return cap
 
 
 def build_weight_maps(canvas_size, center, blend_power: float):
@@ -146,6 +137,7 @@ class GpuStreamHub:
         self._lock = threading.RLock()
         self._mode = "idle"
         self._caps: dict[str, Any] = {}
+        self._cap_wh: dict[str, tuple[int, int]] = {}
         self._preview_pipes: dict[str, UndistortWarpPipeline] = {}
         self._bev_pipes: dict[str, UndistortWarpPipeline] = {}
         self._bev_canvas: tuple[int, int] = (400, 400)
@@ -308,19 +300,27 @@ class GpuStreamHub:
         return self.status()
 
     def _open_caps_unlocked(self) -> None:
-        cfg = _load_json(self.config_path)
+        prof = load_camera_profile()
+        global CAPTURE_W, CAPTURE_H
+        CAPTURE_W, CAPTURE_H = capture_size(prof)
         errors = []
         for d in DIRECTIONS:
-            idx = cfg.get(d)
-            if idx is None:
+            if d not in (prof.get("cameras") or {}):
                 continue
-            LOG.info(f"  open {d} /dev/video{idx} …")
+            idx = None
             try:
-                self._caps[d] = open_camera(int(idx))
-                LOG.info(f"  open {d} OK")
+                from avm.camera_io import direction_device
+
+                idx = direction_device(d, prof)
+                LOG.info(f"  open {d} /dev/video{idx} …")
+                cap, aw, ah, backend = open_camera_direction(d, prof)
+                self._caps[d] = cap
+                self._cap_wh[d] = (int(aw), int(ah))
+                LOG.info(f"  open {d} OK {aw}x{ah} backend={backend}")
             except Exception as exc:
+                path = f"/dev/video{idx}" if idx is not None else d
                 LOG.warn(f"  open {d} FAIL: {exc}")
-                errors.append(f"{d}:/dev/video{idx} ({exc})")
+                errors.append(f"{d}:{path} ({exc})")
         if not self._caps:
             raise RuntimeError(
                 "无可用相机。" + (" ".join(errors) if errors else "")
@@ -335,6 +335,7 @@ class GpuStreamHub:
             except Exception:
                 pass
         self._caps.clear()
+        self._cap_wh.clear()
 
     def _build_preview_unlocked(self) -> None:
         log_cuda_status()
@@ -345,8 +346,9 @@ class GpuStreamHub:
             data = _load_json(path)
             K = np.asarray(data["K"], dtype=np.float64)
             D = np.asarray(data["D"], dtype=np.float64)
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or CAPTURE_W)
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or CAPTURE_H)
+            w, h = self._cap_wh.get(d, (CAPTURE_W, CAPTURE_H))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or w)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or h)
             m1, m2 = init_undistort_maps(
                 K, D, w, h, self.preview_balance, for_cuda=True
             )
@@ -380,8 +382,9 @@ class GpuStreamHub:
             data = _load_json(path)
             K = np.asarray(data["K"], dtype=np.float64)
             D = np.asarray(data["D"], dtype=np.float64)
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or CAPTURE_W)
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or CAPTURE_H)
+            w, h = self._cap_wh.get(d, (CAPTURE_W, CAPTURE_H))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or w)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or h)
             m1, m2 = init_undistort_maps(K, D, w, h, balance, for_cuda=True)
             H = adjust_homography(
                 np.asarray(homographies[d], dtype=np.float64),

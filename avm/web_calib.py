@@ -221,7 +221,7 @@ class WebCalibSession:
             load_extrinsics_file,
             load_placements,
         )
-        from avm.gpu_hub import CAPTURE_H, CAPTURE_W
+        from avm.camera_io import capture_size
 
         self.reload_settings()
         self.kind = "seam"
@@ -250,17 +250,19 @@ class WebCalibSession:
         if data.get("extrinsic_balance") is not None:
             self.extrinsic_balance = float(data["extrinsic_balance"])
 
+        cap_w, cap_h = capture_size()
         for d in DIRECTIONS:
             if d not in self.hub._caps:
                 continue
             try:
                 K, D, rms = load_calib(d, str(calib_dir))
                 self.calib_intr[d] = {"K": K, "D": D, "rms": rms}
+                cw, ch = getattr(self.hub, "_cap_wh", {}).get(d, (cap_w, cap_h))
                 gm1, gm2 = init_undistort_maps(
-                    K, D, CAPTURE_W, CAPTURE_H, self.extrinsic_balance, for_cuda=True
+                    K, D, cw, ch, self.extrinsic_balance, for_cuda=True
                 )
                 self._gpu_pipes[d] = UndistortWarpPipeline(gm1, gm2)
-                self._rebuild_map(d, CAPTURE_W, CAPTURE_H)
+                self._rebuild_map(d, cw, ch)
             except Exception as exc:
                 LOG.warn(f"web_calib seam skip {d}: {exc}")
 
@@ -331,7 +333,7 @@ class WebCalibSession:
 
     def prepare_extrinsics(self) -> None:
         from avm.calibrate_extrinsics import load_calib, load_placements
-        from avm.gpu_hub import CAPTURE_H, CAPTURE_W
+        from avm.camera_io import capture_size
 
         self.reload_settings()
         self.kind = "extrinsics"
@@ -343,19 +345,21 @@ class WebCalibSession:
         self.map_size = {}
         self._gpu_pipes = {}
         calib_dir = ROOT / "calib_results"
+        def_w, def_h = capture_size()
         for d in DIRECTIONS:
             if d not in self.hub._caps:
                 continue
             try:
                 K, D, rms = load_calib(d, str(calib_dir))
                 self.calib_intr[d] = {"K": K, "D": D, "rms": rms}
+                cw, ch = getattr(self.hub, "_cap_wh", {}).get(d, (def_w, def_h))
                 # 预览去畸变：CV_32FC1 maps → GPU remap
                 gm1, gm2 = init_undistort_maps(
-                    K, D, CAPTURE_W, CAPTURE_H, self.extrinsic_balance, for_cuda=True
+                    K, D, cw, ch, self.extrinsic_balance, for_cuda=True
                 )
                 self._gpu_pipes[d] = UndistortWarpPipeline(gm1, gm2)
                 # 求 H 用的 CPU maps（只在 SPACE 连拍时跑）
-                self._rebuild_map(d, CAPTURE_W, CAPTURE_H)
+                self._rebuild_map(d, cw, ch)
             except Exception as exc:
                 LOG.warn(f"web_calib extrinsics skip {d}: {exc}")
         self.stable_streak = {d: 0 for d in DIRECTIONS}

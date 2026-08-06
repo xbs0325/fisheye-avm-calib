@@ -32,8 +32,9 @@ from cuda_cv import log_cuda_status, resize_bgr
 DEFAULT_CONFIG = os.path.join(PROJECT_DIR, "config", "camera_config.json")
 DEFAULT_IMAGES_DIR = os.path.join(PROJECT_DIR, "calib_images")
 DEFAULT_OUTPUT_DIR = os.path.join(PROJECT_DIR, "calib_results")
-CAPTURE_WIDTH = 1920
-CAPTURE_HEIGHT = 1536
+CAPTURE_WIDTH, CAPTURE_HEIGHT = __import__(
+    "avm.camera_io", fromlist=["capture_size"]
+).capture_size()
 PREVIEW_WIDTH = 640
 PREVIEW_HEIGHT = 480
 MIN_CAPTURE_FRAMES = 15
@@ -508,8 +509,11 @@ def evaluate_existing(calib_dir, directions=None):
         rms = data.get("rms", data.get("reproj_error", 999))
 
         # 从已有结果评估（无原始角点数据，仅做 K/D 合理性检查）
-        # 假设图像尺寸为采集分辨率
-        image_size = (1920, 1536)
+        isize = data.get("image_size") or data.get("img_size")
+        if isize and len(isize) >= 2:
+            image_size = (int(isize[0]), int(isize[1]))
+        else:
+            image_size = (CAPTURE_WIDTH, CAPTURE_HEIGHT)
         report = evaluate_intrinsics(
             K, D, rms, image_size,
             obj_points=None, img_points=None,
