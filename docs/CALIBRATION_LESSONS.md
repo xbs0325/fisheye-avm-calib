@@ -210,13 +210,68 @@ stable / burst 等，写回 `config/*.json`；保存后重新开始推流生效�
 配套加一条安全网：图像中心沿该路视线方向的投影应为正，明显为负说明 H 翻转。
 阈值留 `H_CENTER_FLIP_TOL_PX=50px` 余量，避免俯角陡、装得靠内的相机被误伤。
 
-### 4.7 已修：连拍锁定一直在画图处抛异常
+### 4.7 接缝精修：重叠区共视棋盘微调从路 H
+
+卷尺 `near_m` 的毫米级误差会在两路接缝放大。外参算完后不要重测整套摆位，
+用「重叠区放一块板」做相对精修：
+
+1. 锁住参考路 `H_ref`（通常 front / back）
+2. 两路同时检出**同一块**板的角点（原图检测 → `undistortPoints` 到去畸变坐标系）
+3. `P_bev = H_ref @ corners_ref`
+4. 枚举从路角点序（180° 歧义），`H_slave' = findHomography(corners_slave, P_bev)`
+5. 只写回从路 H；`scale` / `canvas` / `extrinsic_balance` / `placements` 不动
+
+网页步骤「2b. 接缝精修」：按 `SEAM_PAIRS` 顺序
+（`front+left` → `front+right` → `back+left` → `back+right`）
+两路 **JOINT 同步达标** → 自动精修 → 写盘 → 下一对；SPACE 可手动触发，ESC 结束保存。
+元数据记在 `extrinsics.json` 的 `seam_refined` 数组。`placements.near_m` 变成历史备注，
+之后不要用旧 placements 重算已精修的 H。
+
+重标前建议备份：`calib_results/backups/extrinsics_*.json`。
+
+### 4.8 已修：连拍锁定一直在画图处抛异常
 
 `calibrate_one` 把外部传入的角点统一转成 float64 求 H（数值上是对的），
 但紧接着的调试图 `cv2.drawChessboardCorners` 只接受 `CV_32FC2`，直接报
 `(-215:Assertion failed) nelems >= 0`。H 其实已经算完，却在存图时炸掉，
 自动锁定的 `try/except` 又把它吞进日志——表现为"检测到了但永远锁不上"。
 修法：求 H 保持 float64，只在画图时 `.astype(np.float32)`。
+
+### 4.9 接缝模式禁止沿用外参的「专注 + 粘滞 READY」
+
+外参逐路标定时，`_focus` 专注 + sticky 角点是对的（CPU 留给当前路）。
+接到接缝模式会翻车：
+
+1. **专注饿死从路**：ref（front）一旦检出就抢走 `_focus`，slave（left/right）长期不提交检测 →
+   画面上左边绿、右边永远 SCANNING，哪怕板已在重叠区两边都看得见。
+2. **粘滞 READY 与板位脱节**：单路独立 `stable_streak` + 漏检仍保留旧角点 →
+   用户挪板去迁就从路时，ref 仍显示上一次的彩虹角点与绿框，age 飙到 0.8s+，
+   「左边随便认、右边认不上、挪了还延迟」。
+
+修法（仅 `kind == "seam"`）：
+
+- 关掉 focus / sticky；pair 两路 **round-robin** 持续提交
+- 漏检立刻清空该路角点（禁止画旧 overlay）
+- 见下一节：改为联合计数，不用单路 READY
+
+### 4.10 接缝必须左右联合计数（板会动）
+
+标定板在重叠区会被挪来挪去。两路各自累计 READY 没有意义——
+一边「锁死」旧位、另一边还在找，自动精修会用**不同时刻、不同板位**的角点求 H。
+
+正确规则（`seam_joint_streak`）：
+
+1. 两路角点都必须新鲜（默认 `seam_fresh_max_age=1.5s`）才算一次同步
+2. 出现新的检测时刻才 +1；任一路漏检或 age 超时 → **共同清零**
+3. UI 两边显示同一个 `SYNC n/need`；只有联合达标才绿框 / 才允许自动精修或 SPACE
+4. 切下一对、精修失败时同样清零联合计数
+
+侧视从路更斜、更远，本来就更难检：接缝下应提高 `detect_duty`、缩短 `detect_interval_ms`，
+并把 `stable_need` 略降（当前 prepare_seam 会夹到 ≤6）。操作上仍要求 **8×6 整板在两路去畸变图内都拍全**。
+
+四对都完成后必须停自动精修（`seam_complete`）。曾漏掉这步：最后一对会无限
+「SYNC→连拍→全部完成」循环，画面像「数到 6 就停几秒、方向不变」。
+换对后还有 `seam_advance_cooldown_s`（默认 5s）给人挪板，避免立刻对空场景连拍。
 
 ## 5. 配置真源
 

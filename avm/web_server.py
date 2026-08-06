@@ -164,6 +164,10 @@ pre {
         <h3>2. 外参标定</h3>
         <p>WebRTC · 稳定后连拍均值</p>
       </div>
+      <div class="step" data-step="seam" onclick="selectStep('seam')">
+        <h3>2b. 接缝精修</h3>
+        <p>重叠区放板 · 微调从路 H</p>
+      </div>
       <div class="step" data-step="preview" onclick="selectStep('preview')">
         <h3>3. 去畸变预览</h3>
         <p>GPU undistort · WebRTC</p>
@@ -174,7 +178,7 @@ pre {
       </div>
     </div>
     <div class="row" id="actions"></div>
-    <p class="note">外参目前无法稳定自动准确；接缝误差属已知问题，GPU 只提帧率。检测已改为全分辨率下采样（默认≤1280），可在下方配置。</p>
+    <p class="note">外参完成后可用「接缝精修」：在两路重叠区放板，锁参考路、微调从路 H，修正卷尺 near_m 误差。</p>
     <div class="cfg">
       <h3>标定配置（写回 config/*.json）</h3>
       <div class="grid2">
@@ -299,6 +303,17 @@ const actions = {
     ['SPACE 锁定READY', "calibCmd('space')"],
     ['ESC 保存外参', "calibCmd('esc')"],
     ['解锁全部', "calibCmd('unlock_all')"],
+  ],
+  seam: [
+    ['开始接缝精修', "startCalib('seam')"],
+    ['下一对', "calibCmd('next_pair')"],
+    ['交换 ref/slave', "calibCmd('swap')"],
+    ['front+left', "calibCmd('pair:front,left')"],
+    ['front+right', "calibCmd('pair:front,right')"],
+    ['back+left', "calibCmd('pair:back,left')"],
+    ['back+right', "calibCmd('pair:back,right')"],
+    ['SPACE 精修从路', "calibCmd('space')"],
+    ['ESC 写回外参', "calibCmd('esc')"],
   ],
   preview: [],
   bev: [],
@@ -582,7 +597,11 @@ async function stopAll() {
 }
 
 async function startCalib(kind) {
-  const mode = kind === 'extrinsics' ? 'calib_extrinsics' : 'calib_intrinsics';
+  const mode = ({
+    extrinsics: 'calib_extrinsics',
+    seam: 'calib_seam',
+    intrinsics: 'calib_intrinsics',
+  })[kind] || 'calib_intrinsics';
   log('启动标定推流 mode=' + mode);
   await startStream(mode);
 }
@@ -674,6 +693,11 @@ def _status_payload() -> dict:
                 f"  逐路标定 当前={tgt} 稳定={got}/{calib.get('stable_need')} "
                 f"待标={calib.get('pending')}"
             )
+        if calib.get("kind") == "seam":
+            lines.append(
+                f"  接缝精修 ref={calib.get('seam_ref')} slave={calib.get('seam_slave')} "
+                f"last={calib.get('seam_last')}"
+            )
     with STATE_LOCK:
         lines.append(
             f"向导 step={STATE['step']} skip_intr={STATE['skipped_intrinsics']} "
@@ -742,7 +766,7 @@ def _start_calib(kind: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AVMGpuWeb/1.1"
+    server_version = "AVMGpuWeb/0.1.1"
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -915,7 +939,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/calib/start":
                 # 兼容旧入口：改为启动 WebRTC 标定流（不再开本机窗口抢相机）
                 kind = (qs.get("kind") or ["intrinsics"])[0]
-                mode = "calib_extrinsics" if kind == "extrinsics" else "calib_intrinsics"
+                mode = {
+                    "extrinsics": "calib_extrinsics",
+                    "seam": "calib_seam",
+                }.get(kind, "calib_intrinsics")
                 assert HUB is not None
                 if WEBRTC:
                     WEBRTC.close_all()

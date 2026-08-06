@@ -184,6 +184,14 @@ class WebCalibSession:
             "auto_lock": self.auto_lock,
             "miss_streak": dict(self._miss_streak),
             "pattern": list(self.pattern),
+            "seam_ref": getattr(self, "seam_ref", None),
+            "seam_slave": getattr(self, "seam_slave", None),
+            "seam_pair": list(getattr(self, "seam_pair", ()) or ()),
+            "seam_last": getattr(self, "seam_last", None),
+            "seam_done": [list(p) for p in getattr(self, "seam_done", [])],
+            "seam_joint_streak": getattr(self, "seam_joint_streak", 0),
+            "seam_complete": bool(getattr(self, "seam_complete", False)),
+            "seam_done": [list(p) for p in (getattr(self, "seam_done", None) or [])],
         }
 
     def prepare_intrinsics(self) -> None:
@@ -202,6 +210,106 @@ class WebCalibSession:
         LOG.info(
             f"web_calib intrinsics dirs={self.dir_list} board={self.pattern} "
             f"sq={self.square} detect_max_w={self.detect_max_width}"
+        )
+        self.start_detector()
+
+    def prepare_seam(self) -> None:
+        """接缝精修：在已有外参基础上，用重叠区棋盘微调从路 H。"""
+        from avm.calibrate_extrinsics import (
+            SEAM_PAIRS,
+            load_calib,
+            load_extrinsics_file,
+            load_placements,
+        )
+        from avm.gpu_hub import CAPTURE_H, CAPTURE_W
+
+        self.reload_settings()
+        self.kind = "seam"
+        cols, rows = self.pattern
+        place_path = ROOT / "config" / "extrinsic_placements.json"
+        self.placements = load_placements(str(place_path), cols, rows, self.square)
+        self.calib_intr = {}
+        self.maps = {}
+        self.map_size = {}
+        self._gpu_pipes = {}
+        calib_dir = ROOT / "calib_results"
+        ext_path = calib_dir / "extrinsics.json"
+        if not ext_path.is_file():
+            raise RuntimeError(f"缺少 {ext_path}，请先完成外参标定")
+        data, H = load_extrinsics_file(str(ext_path))
+        self.homographies = dict(H)
+        self.rms_errors = {
+            k: float(v) for k, v in (data.get("rms_errors") or {}).items()
+        }
+        self.h_quality = dict(data.get("homography_qc") or {})
+        # 画布几何以已存外参为准，避免和 near_m 初标不一致
+        if data.get("scale_px_per_meter") is not None:
+            self.scale = float(data["scale_px_per_meter"])
+        if data.get("canvas_size"):
+            self.canvas = (int(data["canvas_size"][0]), int(data["canvas_size"][1]))
+        if data.get("extrinsic_balance") is not None:
+            self.extrinsic_balance = float(data["extrinsic_balance"])
+
+        for d in DIRECTIONS:
+            if d not in self.hub._caps:
+                continue
+            try:
+                K, D, rms = load_calib(d, str(calib_dir))
+                self.calib_intr[d] = {"K": K, "D": D, "rms": rms}
+                gm1, gm2 = init_undistort_maps(
+                    K, D, CAPTURE_W, CAPTURE_H, self.extrinsic_balance, for_cuda=True
+                )
+                self._gpu_pipes[d] = UndistortWarpPipeline(gm1, gm2)
+                self._rebuild_map(d, CAPTURE_W, CAPTURE_H)
+            except Exception as exc:
+                LOG.warn(f"web_calib seam skip {d}: {exc}")
+
+        missing = [d for d in DIRECTIONS if d not in self.homographies]
+        if len(self.homographies) < 2:
+            raise RuntimeError(
+                f"外参至少需要 2 路 H 才能精修，当前只有 {sorted(self.homographies)}"
+            )
+        # 选一对都有 H 的相邻相机
+        self.seam_pair = None
+        for a, b in SEAM_PAIRS:
+            if a in self.homographies and b in self.homographies:
+                self.seam_pair = (a, b)
+                break
+        if self.seam_pair is None:
+            # 任意两路兜底
+            keys = sorted(self.homographies.keys())
+            self.seam_pair = (keys[0], keys[1])
+        self.seam_ref, self.seam_slave = self.seam_pair
+        self.seam_last = None
+        self.seam_done: list[tuple[str, str]] = []
+        self.seam_complete = False
+        self.seam_joint_streak = 0
+        self._seam_joint_tick = 0.0
+        self._seam_auto_cooldown_until = 0.0
+        self.seam_fresh_max_age = 1.5  # 两路角点都必须在此时间内刷新才算同步
+        self.seam_advance_cooldown_s = 5.0  # 换对后冷却，给人挪板时间，并防连刷精修
+        self.stable_streak = {d: 0 for d in DIRECTIONS}
+        self._miss_streak = {d: 0 for d in DIRECTIONS}
+        self._det_result.clear()
+        self._det_ms.clear()
+        self._det_stage.clear()
+        self._focus = None
+        self._det_sticky = None
+        self.target = None
+        self.sequential = False  # 接缝模式同时检两路
+        # 接缝侧向更难检：加快提交、提高占空比
+        self.detect_interval_ms = min(int(self.detect_interval_ms), 300)
+        self.detect_duty = max(float(self.detect_duty), 0.7)
+        self.stable_need = min(int(self.stable_need), 6)
+        miss_note = f"（缺 {missing}）" if missing else ""
+        self.message = (
+            f"接缝精修：板放在 {self.seam_ref}+{self.seam_slave} 重叠区，"
+            f"两路同步检出才计数（need={self.stable_need}），"
+            f"达标自动精修跳下一对{miss_note}"
+        )
+        LOG.info(
+            f"web_calib seam pairs={self.seam_pair} H={sorted(self.homographies)} "
+            f"scale={self.scale} canvas={self.canvas} balance={self.extrinsic_balance}"
         )
         self.start_detector()
 
@@ -353,7 +461,14 @@ class WebCalibSession:
         with self._det_lock:
             if not self._det_jobs:
                 return None
-            # 专注模式：焦点路只要有任务就一直检它，避免被轮询切走
+            # 接缝：严格轮询两路，保持角点同步刷新
+            if self.kind == "seam":
+                order = list(self._det_jobs.keys())
+                d = order[self.detect_rr % len(order)]
+                self.detect_rr = (self.detect_rr + 1) % max(len(order), 1)
+                img, scale = self._det_jobs.pop(d)
+                return d, img, scale
+            # 外参专注模式：焦点路只要有任务就一直检它
             focus = self._focus
             if focus is not None and focus in self._det_jobs:
                 d = focus
@@ -363,6 +478,30 @@ class WebCalibSession:
                 self.detect_rr = (self.detect_rr + 1) % max(len(order), 1)
             img, scale = self._det_jobs.pop(d)
             return d, img, scale
+
+    def _update_seam_joint_streak(self) -> int:
+        """两路角点都新鲜才 +1；任一过期/漏检则共同清零。返回当前联合计数。"""
+        ref, slave = self.seam_ref, self.seam_slave
+        now = time.monotonic()
+        max_age = float(getattr(self, "seam_fresh_max_age", 1.5))
+        newest = 0.0
+        for d in (ref, slave):
+            ok, corners, ts = self._det_result.get(d, (False, None, 0.0))
+            age = (now - ts) if ts else 999.0
+            if not ok or corners is None or age > max_age:
+                self.seam_joint_streak = 0
+                self._seam_joint_tick = 0.0
+                self.stable_streak[ref] = 0
+                self.stable_streak[slave] = 0
+                return 0
+            newest = max(newest, float(ts))
+        # 只有出现新的检测时刻才加分，避免同一次结果被反复加
+        if newest > float(getattr(self, "_seam_joint_tick", 0.0)) + 1e-6:
+            self.seam_joint_streak = int(self.seam_joint_streak) + 1
+            self._seam_joint_tick = newest
+        self.stable_streak[ref] = self.seam_joint_streak
+        self.stable_streak[slave] = self.seam_joint_streak
+        return self.seam_joint_streak
 
     def _detector_loop(self) -> None:
         while not self._det_stop.is_set():
@@ -405,15 +544,24 @@ class WebCalibSession:
                 self._det_ms[d] = ms
                 self._det_stage[d] = stage
                 self.last_detect_ok[d] = ok
-                if ok:
-                    # 命中：保留角点，累积 streak，并把检测焦点钉在这一路
+                if self.kind == "seam":
+                    # 接缝：单路只更新自己的最新结果；漏检立刻清空，禁止沿用旧角点
+                    if ok:
+                        self._det_result[d] = (True, corners_full, time.monotonic())
+                        self._miss_streak[d] = 0
+                    else:
+                        self._det_result[d] = (False, None, time.monotonic())
+                        self._miss_streak[d] = self._miss_streak.get(d, 0) + 1
+                    streak_now = self._update_seam_joint_streak()
+                elif ok:
+                    # 命中：保留角点，累积 streak
                     self._det_result[d] = (True, corners_full, time.monotonic())
                     self._miss_streak[d] = 0
                     self.stable_streak[d] = self.stable_streak.get(d, 0) + 1
                     self._det_sticky = d
                     self._focus = d
+                    streak_now = self.stable_streak.get(d, 0)
                 else:
-                    # 未命中：保留上一次角点用于显示，只更新时间戳与计数
                     prev_ok, prev_corners, _ = self._det_result.get(
                         d, (False, None, 0.0)
                     )
@@ -421,7 +569,6 @@ class WebCalibSession:
                         prev_ok, prev_corners, time.monotonic()
                     )
                     self._miss_streak[d] = self._miss_streak.get(d, 0) + 1
-                    # 单次抖动不清零，连续 miss 达阈值才归零
                     if self._miss_streak[d] >= self.streak_reset_misses:
                         self.stable_streak[d] = 0
                         self._det_result[d] = (False, None, time.monotonic())
@@ -429,18 +576,50 @@ class WebCalibSession:
                         self.stable_streak[d] = max(
                             0, self.stable_streak.get(d, 0) - 1
                         )
-                    # 焦点路连续丢失太久才放开，交还轮询
                     if (
                         self._focus == d
                         and self._miss_streak[d] >= self.focus_miss_tolerance
                     ):
                         self._focus = None
                         self._det_sticky = None
-                streak_now = self.stable_streak.get(d, 0)
+                    streak_now = self.stable_streak.get(d, 0)
 
-            # 自动锁定：streak 达标就地求 H，不用再按 SPACE
+            # 接缝：两路同步达标后自动精修 → 写盘 → 下一对
+            # 全部完成后必须停，否则会在最后一对上无限连拍（日志里一串「全部完成」）
             if (
-                self.auto_lock
+                self.kind == "seam"
+                and not self._lock_busy
+                and not getattr(self, "seam_complete", False)
+                and self.seam_ref
+                and self.seam_slave
+                and streak_now >= self.stable_need
+                and time.monotonic() >= float(
+                    getattr(self, "_seam_auto_cooldown_until", 0.0)
+                )
+            ):
+                self._lock_busy = True
+                try:
+                    out = self._refine_seam_now()
+                    if out.get("ok"):
+                        self._persist_seam()
+                        self._advance_seam_after_refine()
+                    else:
+                        # 失败也冷却，避免 SYNC 刚清零又被连拍占满数秒
+                        self._seam_auto_cooldown_until = (
+                            time.monotonic() + 2.0
+                        )
+                except Exception as exc:
+                    LOG.error(f"seam 自动精修失败: {exc}")
+                    self.message = f"自动精修失败: {exc}"
+                    self._seam_auto_cooldown_until = time.monotonic() + 2.0
+                finally:
+                    self._lock_busy = False
+                continue
+
+            # 自动锁定：仅外参模式；streak 达标就地求 H
+            if (
+                self.kind == "extrinsics"
+                and self.auto_lock
                 and ok
                 and streak_now >= self.stable_need
                 and d not in self.homographies
@@ -466,6 +645,8 @@ class WebCalibSession:
             return self._compose_intrinsics(frames)
         if self.kind == "extrinsics":
             return self._compose_extrinsics(frames)
+        if self.kind == "seam":
+            return self._compose_seam(frames)
         return np.zeros((TILE_H * 2, TILE_W * 2, 3), dtype=np.uint8)
 
     def _detect_size(self, w: int, h: int) -> tuple[int, int, float]:
@@ -480,6 +661,18 @@ class WebCalibSession:
         # 顺序模式：只检当前目标那一路，其余路完全不占 CPU，也不会抢焦点
         if self.kind == "extrinsics" and self.sequential and self.target != d:
             return False
+        # 接缝模式：pair 两路持续提交；全部完成后不再检（避免无意义占 CPU）
+        if self.kind == "seam":
+            if getattr(self, "seam_complete", False):
+                return False
+            pair = getattr(self, "seam_pair", None) or ()
+            if d not in pair:
+                return False
+            with self._det_lock:
+                if d in self._det_jobs:
+                    return False
+                last = self._det_submit_t.get(d, 0.0)
+            return (time.monotonic() - last) * 1000.0 >= self.detect_interval_ms
         with self._det_lock:
             if d in self._det_jobs:
                 return False
@@ -670,13 +863,423 @@ class WebCalibSession:
         )
         return grid
 
+    def _compose_seam(self, frames: dict[str, np.ndarray]) -> np.ndarray:
+        """显示当前 pair 的去畸变图 + 两路 warp 到 BEV 的叠图。"""
+        from avm.calibrate_extrinsics import _project_corners_h
+        from avm.cuda_cv import warp_perspective_bgr
+
+        ref = self.seam_ref
+        slave = self.seam_slave
+        tiles = []
+        for d in (ref, slave):
+            fr = frames.get(d)
+            if fr is None:
+                tiles.append(np.zeros((TILE_H, TILE_W, 3), dtype=np.uint8))
+                continue
+            h0, w0 = fr.shape[:2]
+            self._src_wh = (int(w0), int(h0))
+            pipe = self._gpu_pipes.get(d)
+            if pipe is not None and pipe.use_cuda:
+                gm = pipe.undistort_gpu(fr)
+                tile = cv2.cuda.resize(gm, (TILE_W, TILE_H)).download()
+            else:
+                tile = resize_bgr(fr, (TILE_W, TILE_H))
+            if self._should_submit(d):
+                dw, dh, sc = self._detect_size(w0, h0)
+                det_img = fr.copy() if (dw, dh) == (w0, h0) else resize_bgr(fr, (dw, dh))
+                self._submit_detect(d, det_img, sc)
+
+            role = "REF" if d == ref else "SLAVE"
+            cv2.putText(
+                tile, f"{d.upper()} [{role}]", (8, TILE_H - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1,
+            )
+            if getattr(self, "seam_complete", False):
+                cv2.rectangle(tile, (2, 2), (TILE_W - 3, TILE_H - 3), (0, 255, 0), 3)
+                cv2.putText(tile, "ALL PAIRS DONE", (12, 36),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(tile, "next=redo pair", (12, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 255, 180), 1)
+                tiles.append(tile)
+                continue
+            cool_left = max(
+                0.0,
+                float(getattr(self, "_seam_auto_cooldown_until", 0.0))
+                - time.monotonic(),
+            )
+            ok, corners, age, ms = self._det_snapshot(d)
+            # 显示层：任一路不新鲜则联合计数视为 0（板可能已挪，禁止粘旧状态）
+            with self._det_lock:
+                joint = self._update_seam_joint_streak()
+            fresh = bool(
+                ok and corners is not None
+                and age <= getattr(self, "seam_fresh_max_age", 1.5)
+            )
+            if cool_left > 0.05:
+                cv2.putText(
+                    tile, f"MOVE BOARD {cool_left:.0f}s", (12, 36),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
+                )
+                cv2.putText(
+                    tile, f"next {slave if d == ref else ref}", (12, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1,
+                )
+                tiles.append(tile)
+                continue
+            if fresh:
+                c_draw = self._raw_corners_to_undistorted(d, corners, w0, h0)
+                c_tile = project_corners_to_tile(c_draw, (w0, h0), (TILE_W, TILE_H))
+                cv2.drawChessboardCorners(tile, self.pattern, c_tile, True)
+            ready = joint >= self.stable_need and fresh
+            # 两路显示同一联合计数；只有两边都新鲜才可能绿
+            if ready:
+                cv2.rectangle(tile, (2, 2), (TILE_W - 3, TILE_H - 3), (0, 255, 0), 3)
+                cv2.putText(tile, f"SYNC {joint}/{self.stable_need}", (12, 36),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+            elif fresh:
+                cv2.rectangle(tile, (2, 2), (TILE_W - 3, TILE_H - 3), (0, 200, 255), 2)
+                cv2.putText(tile, f"SYNC {joint}/{self.stable_need}", (12, 36),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            else:
+                stage = self._det_stage.get(d, "-")
+                msg = (
+                    f"NOT FULLY IN VIEW {stage[3:]}"
+                    if str(stage).startswith("oob") else "WAITING PAIR"
+                )
+                cv2.putText(tile, msg, (12, 36),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
+                cv2.putText(tile, f"SYNC {joint}/{self.stable_need}", (12, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+            age_y = 58 if fresh or ready else 92
+            cv2.putText(
+                tile, f"det {ms:.0f}ms age {age:.1f}s", (12, age_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1,
+            )
+            tiles.append(tile)
+
+        # 下半：两路按当前 H warp 叠到同一 BEV 缩略图
+        bev_tile = np.zeros((TILE_H, TILE_W * 2, 3), dtype=np.uint8)
+        try:
+            cw, ch = self.canvas
+            acc = np.zeros((ch, cw, 3), dtype=np.float32)
+            wsum = np.zeros((ch, cw), dtype=np.float32)
+            corner_layers = []  # (pts, color)
+            colors = {ref: (0, 255, 255), slave: (0, 165, 255)}
+            for d in (ref, slave):
+                fr = frames.get(d)
+                if fr is None or d not in self.homographies:
+                    continue
+                pipe = self._gpu_pipes.get(d)
+                und = (
+                    pipe.undistort_gpu(fr).download()
+                    if pipe is not None and pipe.use_cuda else fr
+                )
+                warped = warp_perspective_bgr(und, self.homographies[d], self.canvas)
+                mask = (warped.sum(axis=2) > 0).astype(np.float32)
+                acc += warped.astype(np.float32) * mask[..., None]
+                wsum += mask
+                ok, corners, age, _ = self._det_snapshot(d)
+                fresh = bool(
+                    ok and corners is not None
+                    and age <= getattr(self, "seam_fresh_max_age", 1.5)
+                )
+                if fresh:
+                    h0, w0 = fr.shape[:2]
+                    c_und = self._raw_corners_to_undistorted(d, corners, w0, h0)
+                    c_bev = _project_corners_h(c_und, self.homographies[d])
+                    corner_layers.append((c_bev, colors[d]))
+            out = np.clip(acc / np.maximum(wsum[..., None], 1e-6), 0, 255).astype(np.uint8)
+            for pts, color in corner_layers:
+                p = pts.reshape(-1, 2)
+                for i in range(len(p)):
+                    cv2.circle(out, tuple(np.round(p[i]).astype(int)), 3, color, -1)
+            bev_tile = resize_bgr(out, (TILE_W * 2, TILE_H))
+        except Exception as exc:
+            LOG.warn(f"seam BEV preview: {exc}")
+            cv2.putText(bev_tile, f"BEV preview fail: {exc}", (12, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        last = self.seam_last or {}
+        done = getattr(self, "seam_done", []) or []
+        if getattr(self, "seam_complete", False):
+            hud = (
+                f"SEAM ALL DONE  pairs={len(done)//2}/4  "
+                f"last Δ={last.get('improved_px', '-')}px  next=redo"
+            )
+        else:
+            cool_left = max(
+                0.0,
+                float(getattr(self, "_seam_auto_cooldown_until", 0.0))
+                - time.monotonic(),
+            )
+            cool_s = f" cool={cool_left:.0f}s" if cool_left > 0.05 else ""
+            hud = (
+                f"SEAM ref={ref} slave={slave} done={len(done)//2}/4  "
+                f"before={last.get('rms_before_px', '-')} "
+                f"after={last.get('rms_after_px', '-')} "
+                f"d={last.get('improved_px', '-')}px{cool_s}  JOINT sync→auto"
+            )
+        cv2.putText(bev_tile, hud, (8, TILE_H - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
+        top = np.hstack(tiles)
+        return np.vstack([top, bev_tile])
+
     def action(self, cmd: str) -> dict[str, Any]:
         cmd = (cmd or "").strip().lower()
         if self.kind == "intrinsics":
             return self._action_intrinsics(cmd)
         if self.kind == "extrinsics":
             return self._action_extrinsics(cmd)
+        if self.kind == "seam":
+            return self._action_seam(cmd)
         return {"ok": False, "error": "no calib session"}
+
+    def _action_seam(self, cmd: str) -> dict[str, Any]:
+        from avm.calibrate_extrinsics import SEAM_PAIRS
+
+        if cmd.startswith("pair:"):
+            # pair:front,left
+            parts = cmd.split(":", 1)[1].split(",")
+            if len(parts) != 2:
+                return {"ok": False, "error": "pair 格式: pair:front,left"}
+            a, b = parts[0].strip(), parts[1].strip()
+            if a not in self.homographies or b not in self.homographies:
+                return {"ok": False, "error": f"{a}/{b} 缺少 H"}
+            self.seam_pair = (a, b)
+            self.seam_ref, self.seam_slave = a, b
+            self.seam_complete = False
+            # 手动选对 = 允许重做：从 done 里拿掉这对
+            self.seam_done = [
+                p for p in self.seam_done if p not in ((a, b), (b, a))
+            ]
+            with self._det_lock:
+                self.stable_streak = {d: 0 for d in DIRECTIONS}
+                self._miss_streak = {d: 0 for d in DIRECTIONS}
+                self._det_result.clear()
+                self.seam_joint_streak = 0
+                self._seam_joint_tick = 0.0
+            self._seam_auto_cooldown_until = 0.0
+            self.message = f"接缝对切换为 {a}(ref) + {b}(slave)"
+            return {"ok": True, "pair": [a, b], "message": self.message}
+
+        if cmd == "swap":
+            self.seam_ref, self.seam_slave = self.seam_slave, self.seam_ref
+            self.seam_pair = (self.seam_ref, self.seam_slave)
+            self.message = f"已交换：ref={self.seam_ref} slave={self.seam_slave}"
+            return {"ok": True, "message": self.message}
+
+        if cmd == "next_pair":
+            cur = (self.seam_ref, self.seam_slave)
+            # 在 SEAM_PAIRS 及其交换中找下一对两者都有 H 的
+            cands = []
+            for a, b in SEAM_PAIRS:
+                if a in self.homographies and b in self.homographies:
+                    cands.append((a, b))
+                    cands.append((b, a))
+            if not cands:
+                return {"ok": False, "error": "没有可用的相机对"}
+            try:
+                i = cands.index(cur)
+            except ValueError:
+                i = -1
+            nxt = cands[(i + 1) % len(cands)]
+            self.seam_ref, self.seam_slave = nxt
+            self.seam_pair = nxt
+            self.seam_complete = False
+            a, b = nxt
+            self.seam_done = [
+                p for p in self.seam_done if p not in ((a, b), (b, a))
+            ]
+            with self._det_lock:
+                self.stable_streak = {d: 0 for d in DIRECTIONS}
+                self._miss_streak = {d: 0 for d in DIRECTIONS}
+                self._det_result.clear()
+                self._det_jobs.clear()
+                self.seam_joint_streak = 0
+                self._seam_joint_tick = 0.0
+            self._seam_auto_cooldown_until = 0.0
+            self.message = f"下一对：ref={nxt[0]} slave={nxt[1]}"
+            return {"ok": True, "pair": list(nxt), "message": self.message}
+
+        if cmd in ("space", "refine", "capture"):
+            if self._lock_busy:
+                return {"ok": False, "error": "busy"}
+            ref, slave = self.seam_ref, self.seam_slave
+            if int(getattr(self, "seam_joint_streak", 0)) < self.stable_need:
+                self.message = (
+                    f"两路未同步（joint {self.seam_joint_streak}/{self.stable_need}）"
+                )
+                return {"ok": False, "error": self.message}
+            self._lock_busy = True
+            try:
+                out = self._refine_seam_now()
+                if out.get("ok"):
+                    self._persist_seam()
+                    self._advance_seam_after_refine()
+                    out["message"] = self.message
+                return out
+            finally:
+                self._lock_busy = False
+
+        if cmd in ("esc", "save", "done", "finish"):
+            path = self._persist_seam()
+            self.message = f"接缝结果已保存 {path}（已完成 {len(self.seam_done)} 对）"
+            LOG.info(self.message)
+            return {
+                "ok": True, "done": True, "path": path,
+                "seam_done": list(self.seam_done), "message": self.message,
+            }
+
+        return {"ok": False, "error": f"unknown seam cmd {cmd}"}
+
+    def _persist_seam(self) -> str:
+        """把当前内存中的 H 写回 extrinsics.json，并追加 seam_refined 记录。"""
+        import json
+
+        out = str(ROOT / "calib_results" / "extrinsics.json")
+        data = json.loads(Path(out).read_text(encoding="utf-8"))
+        for d, H in self.homographies.items():
+            data.setdefault("homographies", {})[d] = np.asarray(H).tolist()
+        if self.seam_last:
+            data.setdefault("seam_refined", []).append(dict(self.seam_last))
+        Path(out).write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        LOG.info(f"seam persisted -> {out} last={self.seam_last}")
+        return out
+
+    def _advance_seam_after_refine(self) -> None:
+        """当前对记入 done，切到下一对未完成的 SEAM_PAIRS。"""
+        from avm.calibrate_extrinsics import SEAM_PAIRS
+
+        cur = (self.seam_ref, self.seam_slave)
+        if cur not in self.seam_done:
+            self.seam_done.append(cur)
+        # 也把对偶方向算完成，避免 swap 后又做一遍
+        alt = (self.seam_slave, self.seam_ref)
+        if alt not in self.seam_done:
+            self.seam_done.append(alt)
+
+        nxt = None
+        for a, b in SEAM_PAIRS:
+            if a not in self.homographies or b not in self.homographies:
+                continue
+            if (a, b) in self.seam_done:
+                continue
+            nxt = (a, b)
+            break
+        with self._det_lock:
+            self.stable_streak = {d: 0 for d in DIRECTIONS}
+            self._miss_streak = {d: 0 for d in DIRECTIONS}
+            self._det_result.clear()
+            self._det_jobs.clear()
+            self.seam_joint_streak = 0
+            self._seam_joint_tick = 0.0
+        if nxt is None:
+            self.seam_complete = True
+            self.message = (
+                f"接缝精修全部完成 {self.seam_last and self.seam_last.get('slave')} "
+                f"Δ{self.seam_last.get('improved_px') if self.seam_last else '-'}px · "
+                f"已写盘，可看实时 BEV（next 可重做某对）"
+            )
+            LOG.info(self.message)
+            return
+        self.seam_complete = False
+        self.seam_ref, self.seam_slave = nxt
+        self.seam_pair = nxt
+        self._seam_auto_cooldown_until = (
+            time.monotonic()
+            + float(getattr(self, "seam_advance_cooldown_s", 5.0))
+        )
+        self.message = (
+            f"已精修并保存，下一对：{nxt[0]}(ref)+{nxt[1]}(slave)，"
+            f"把板挪到重叠区（{getattr(self, 'seam_advance_cooldown_s', 5):.0f}s 后再自动计）"
+        )
+        LOG.info(self.message)
+
+    def _refine_seam_now(self) -> dict[str, Any]:
+        from avm.calibrate_extrinsics import (
+            average_corners,
+            detect_board,
+            refine_seam_homography,
+        )
+        from avm.cuda_cv import undistort_points_fisheye
+
+        ref, slave = self.seam_ref, self.seam_slave
+        cols, rows = self.pattern
+        corners_und = {}
+        for d in (ref, slave):
+            frames = self._burst_from_hub_cap(d, self.burst_n)
+            if len(frames) < self.burst_min_ok:
+                self.message = f"{d} 连拍帧不足 {len(frames)}/{self.burst_min_ok}"
+                with self._det_lock:
+                    self.stable_streak[ref] = 0
+                    self.stable_streak[slave] = 0
+                    self.seam_joint_streak = 0
+                    self._seam_joint_tick = 0.0
+                return {"ok": False, "error": self.message}
+            found = []
+            K = self.calib_intr[d]["K"]
+            D = self.calib_intr[d]["D"]
+            for img in frames:
+                h0, w0 = img.shape[:2]
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                c_raw = detect_board(gray, cols, rows)
+                if c_raw is None:
+                    continue
+                c_und = undistort_points_fisheye(
+                    c_raw, K, D, w0, h0, self.extrinsic_balance
+                )
+                found.append(c_und.reshape(-1, 2))
+            if len(found) < self.burst_min_ok:
+                self.message = f"{d} 检出不足 {len(found)}/{self.burst_min_ok}"
+                with self._det_lock:
+                    self.stable_streak[ref] = 0
+                    self.stable_streak[slave] = 0
+                    self.seam_joint_streak = 0
+                    self._seam_joint_tick = 0.0
+                return {"ok": False, "error": self.message}
+            mean, n_used, st = average_corners(found, cols, rows)
+            corners_und[d] = mean.astype(np.float32)
+            LOG.info(f"seam {d} burst corners n={n_used} jitter={st.get('corner_jitter_px')}")
+
+        H_new, stats = refine_seam_homography(
+            corners_und[ref],
+            corners_und[slave],
+            self.homographies[ref],
+            self.homographies[slave],
+            cols,
+            rows,
+        )
+        if H_new is None:
+            self.message = f"精修失败: {stats.get('error')}"
+            with self._det_lock:
+                self.stable_streak[ref] = 0
+                self.stable_streak[slave] = 0
+                self.seam_joint_streak = 0
+                self._seam_joint_tick = 0.0
+            return {"ok": False, "error": self.message, "stats": stats}
+
+        self.homographies[slave] = H_new
+        self.seam_last = {
+            "ref": ref,
+            "slave": slave,
+            "rms_before_px": round(stats["rms_before_px"], 3),
+            "rms_after_px": round(stats["rms_after_px"], 3),
+            "improved_px": round(stats["improved_px"], 3),
+            "board_span_bev_px": round(stats.get("board_span_bev_px", 0), 1),
+            "n_inliers": stats.get("n_inliers"),
+        }
+        warn = stats.get("warning")
+        self.message = (
+            f"精修 {slave}: {self.seam_last['rms_before_px']}→"
+            f"{self.seam_last['rms_after_px']}px "
+            f"(Δ{self.seam_last['improved_px']})"
+            + (f" ⚠{warn}" if warn else "")
+        )
+        LOG.info(f"seam refine {self.seam_last}")
+        return {"ok": True, "stats": self.seam_last, "message": self.message}
 
     def _action_intrinsics(self, cmd: str) -> dict[str, Any]:
         from avm.calibrate_intrinsics import (

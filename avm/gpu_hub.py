@@ -258,7 +258,7 @@ class GpuStreamHub:
 
     def start(self, mode: str) -> dict[str, Any]:
         mode = mode.lower().strip()
-        allowed = ("preview", "bev", "raw", "calib_intrinsics", "calib_extrinsics")
+        allowed = ("preview", "bev", "raw", "calib_intrinsics", "calib_extrinsics", "calib_seam")
         if mode not in allowed:
             raise ValueError(f"未知 mode={mode}")
         if mode in ("preview", "bev") and self.require_cuda and not cuda_available():
@@ -283,14 +283,16 @@ class GpuStreamHub:
                 elif mode == "bev":
                     LOG.info("构建 GPU bev pipeline…")
                     self._build_bev_unlocked()
-                elif mode in ("calib_intrinsics", "calib_extrinsics"):
+                elif mode in ("calib_intrinsics", "calib_extrinsics", "calib_seam"):
                     from avm.web_calib import WebCalibSession
 
                     self.calib = WebCalibSession(self)
                     if mode == "calib_intrinsics":
                         self.calib.prepare_intrinsics()
-                    else:
+                    elif mode == "calib_extrinsics":
                         self.calib.prepare_extrinsics()
+                    else:
+                        self.calib.prepare_seam()
                 LOG.info(f"hub.start OK cuda={self._using_cuda}")
             except Exception as exc:
                 self._release_caps_unlocked()
@@ -489,7 +491,7 @@ class GpuStreamHub:
                     self._gpu_ms = (time.perf_counter() - t0) * 1000.0
                 elif mode == "bev":
                     img = self._compose_bev(frames)
-                elif mode in ("calib_intrinsics", "calib_extrinsics") and self.calib is not None:
+                elif mode in ("calib_intrinsics", "calib_extrinsics", "calib_seam") and self.calib is not None:
                     img = self.calib.compose(frames)
                     self._gpu_ms = (time.perf_counter() - t0) * 1000.0
                 else:

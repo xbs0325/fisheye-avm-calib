@@ -1,6 +1,6 @@
 # fisheye-avm-calib
 
-Jetson 四路鱼眼环视标定与 GPU BEV 拼接（CUDA OpenCV + WebRTC 引导）。
+**v0.1.1** — Jetson 四路鱼眼环视标定与 GPU BEV 拼接（CUDA OpenCV + WebRTC 引导）。
 
 ## 快速开始
 
@@ -33,3 +33,10 @@ source scripts/env_opencv_cuda.sh
 | `config/` | 相机 / 棋盘 / placement |
 | `calib_results/*.json` | 内参 / 外参结果 |
 | `docs/` | 管线、难点、WORKLOG |
+
+## 版本
+
+| 版本 | 说明 |
+|------|------|
+| 0.1.1 | 接缝精修（2b）、联合同步计数、外参 QC/180° 定向、标定教训补全 |
+| 0.1.0 | 初版：GPU Web 引导、内外参标定、BEV 拼接 |

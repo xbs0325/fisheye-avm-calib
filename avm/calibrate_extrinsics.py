@@ -281,6 +281,140 @@ def align_corners_to_ref(corners: np.ndarray, ref: np.ndarray, cols: int, rows: 
     return best, best_d
 
 
+def _seam_order_candidates(corners: np.ndarray, cols: int, rows: int):
+    """接缝精修用的角点序候选：原序 / 反向 / 180° / 180° 反向。"""
+    c = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+    grid = c.reshape(rows, cols, 2)
+    rot180 = np.flip(np.flip(grid, 0), 1).reshape(-1, 2)
+    return [c, c[::-1], rot180, rot180[::-1]]
+
+
+def _project_corners_h(corners: np.ndarray, H) -> np.ndarray:
+    pts = np.asarray(corners, dtype=np.float32).reshape(-1, 1, 2)
+    return cv2.perspectiveTransform(pts, np.asarray(H, dtype=np.float64)).reshape(-1, 2)
+
+
+def _reproj_rms(corners: np.ndarray, targets: np.ndarray, H) -> float:
+    pred = _project_corners_h(corners, H)
+    tgt = np.asarray(targets, dtype=np.float64).reshape(-1, 2)
+    return float(np.sqrt(np.mean(np.sum((pred - tgt) ** 2, axis=1))))
+
+
+# 相邻相机对：重叠区通常在这两路之间
+SEAM_PAIRS = (
+    ("front", "left"),
+    ("front", "right"),
+    ("back", "left"),
+    ("back", "right"),
+)
+
+
+def refine_seam_homography(
+    corners_ref: np.ndarray,
+    corners_slave: np.ndarray,
+    H_ref,
+    H_slave_old,
+    cols: int,
+    rows: int,
+):
+    """接缝精修：锁住参考路 H，把从路 H 重求到同一块板的 BEV 目标。
+
+    两路角点必须已在「去畸变图」坐标系（与存盘 H 一致）。
+    返回 (H_slave_new, stats)；失败返回 (None, stats_with_error)。
+    """
+    H_ref = np.asarray(H_ref, dtype=np.float64)
+    H_old = np.asarray(H_slave_old, dtype=np.float64)
+    ref = np.asarray(corners_ref, dtype=np.float64).reshape(-1, 2)
+    if ref.shape[0] != cols * rows:
+        return None, {"error": f"参考路角点数 {ref.shape[0]} != {cols*rows}"}
+
+    P_ref = _project_corners_h(ref, H_ref)
+
+    best = None  # (H, rms, order_i)
+    for i, cand in enumerate(_seam_order_candidates(corners_slave, cols, rows)):
+        H, mask = cv2.findHomography(
+            cand.astype(np.float32),
+            P_ref.astype(np.float32),
+            cv2.RANSAC,
+            ransacReprojThreshold=3.0,
+            maxIters=2000,
+            confidence=0.995,
+        )
+        if H is None:
+            continue
+        inlier = (
+            mask.ravel().astype(bool)
+            if mask is not None
+            else np.ones(len(cand), dtype=bool)
+        )
+        if int(inlier.sum()) < max(4, cols * rows // 2):
+            continue
+        rms = _reproj_rms(cand[inlier], P_ref[inlier], H)
+        inlier_ratio = float(inlier.mean())
+        if best is None or rms < best[1] - 1e-9 or (
+            abs(rms - best[1]) < 1e-9 and inlier_ratio > best[3]
+        ):
+            best = (H, rms, i, inlier_ratio, int(inlier.sum()))
+
+    if best is None:
+        return None, {"error": "findHomography 失败：两路角点无法对齐"}
+
+    H_new, rms_after, order_i, inlier_ratio, n_inliers = best
+    # 用同一角点序评估精修前误差，才有可比性
+    cand_best = _seam_order_candidates(corners_slave, cols, rows)[order_i]
+    rms_before = _reproj_rms(cand_best, P_ref, H_old)
+    # 角点在 BEV 上的跨度：过小说明板几乎退化
+    span = float(np.linalg.norm(P_ref.max(axis=0) - P_ref.min(axis=0)))
+    stats = {
+        "rms_before_px": rms_before,
+        "rms_after_px": rms_after,
+        "improved_px": float(rms_before - rms_after),
+        "order_index": order_i,
+        "inlier_ratio": inlier_ratio,
+        "n_inliers": n_inliers,
+        "board_span_bev_px": span,
+    }
+    if span < 20.0:
+        stats["warning"] = f"板在 BEV 上跨度仅 {span:.1f}px，精修可能不稳"
+    return H_new, stats
+
+
+def load_extrinsics_file(path: str):
+    """读 extrinsics.json，homographies 转成 float64 ndarray。"""
+    with open(path, "r") as f:
+        data = json.load(f)
+    H = {
+        d: np.asarray(M, dtype=np.float64)
+        for d, M in (data.get("homographies") or {}).items()
+    }
+    return data, H
+
+
+def patch_extrinsics_homography(
+    path: str,
+    direction: str,
+    H_new,
+    *,
+    rms=None,
+    seam_meta=None,
+):
+    """只改某一路 H（及可选 rms / seam 元数据），其余字段原样保留。"""
+    with open(path, "r") as f:
+        data = json.load(f)
+    homs = data.setdefault("homographies", {})
+    if direction not in homs:
+        raise KeyError(f"{path} 中没有 {direction} 的 H，无法精修")
+    homs[direction] = np.asarray(H_new, dtype=np.float64).tolist()
+    if rms is not None:
+        data.setdefault("rms_errors", {})[direction] = float(rms)
+    if seam_meta is not None:
+        hist = data.setdefault("seam_refined", [])
+        hist.append(dict(seam_meta))
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    return data
+
+
 def average_corners(
     corners_list,
     cols: int,

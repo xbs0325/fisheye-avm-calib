@@ -9,6 +9,7 @@ calib_results/*_bev*.jpg
 calib_results/*_undis*.jpg
 calib_results/*_burst_*.jpg
 calib_results/extrinsics_draft.json
+calib_results/backups/
 debug_detect/
 *.obsolete*
 *.backup*

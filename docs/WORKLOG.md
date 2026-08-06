@@ -1,5 +1,32 @@
 # 工作记录 WORKLOG
 
+## 2026-08-06 — 接缝：全部完成后停自动精修
+
+日志里一串「接缝精修全部完成」却仍对 back+right 连拍：`seam_complete` 未置位，
+SYNC 到 6 就反复 burst（暂停 grab → 画面像中断），方向不再变。
+
+- 完成后停检测 / 停自动精修；HUD 显示 ALL PAIRS DONE
+- 换对冷却 5s（MOVE BOARD）；失败也短冷却
+- next/pair 可重做该对
+
+## 2026-08-06 — 接缝精修：联合同步计数（修粘滞 / 饿死从路）
+
+用户反馈：右边（slave）一直认不上；挪板迁就右边后左边仍停在旧角点；应左右同步计数。
+
+- 根因：seam 误用外参的 `_focus` + 单路 sticky READY → ref 粘旧、slave 饿检
+- `seam_joint_streak`：两路都新鲜才 +1，任一路 miss/超时共同清零
+- 漏检立刻清角点；pair 轮询持续提交；UI 统一 `SYNC n/need`
+- 达标自动精修→写盘→下一对；文档补 4.9 / 4.10
+
+## 2026-08-06 — 接缝精修功能（2b）
+
+卷尺 `near_m` 接缝误差：锁 `H_ref`，重叠区共视板重求 `H_slave`。
+
+- 核心：`refine_seam_homography` / `SEAM_PAIRS`（`avm/calibrate_extrinsics.py`）
+- Web：`kind=seam`，步骤 2b；只写从路 H + `seam_refined[]`
+- 外参 QC：位移模长 / 奇异值（修 left/right「病态」误报）；180° 近边定向
+- 部分保存合并旧 H；备份 `calib_results/backups/`
+
 ## 2026-08-05 — 远距检测：改用 findChessboardCornersSB
 
 用户反馈"远了识别不到，要从近处拿向远处才认得出"。
@@ -11,6 +38,23 @@
 - `detect_use_sb` 可回退；`detect_interval_ms` 500 / `detect_duty` 0.5
 - `stable_frames` 保持 10（用户确认可用）
 - 附带发现：偶数格棋盘 180° 翻转歧义约 50%，但 `calibrate_one` 枚举 4 旋转吸收
+
+## 2026-08-05 — 外参：原图检测 + 整板 inview + 逐路顺序 + 合并保存
+
+（详见 `CALIBRATION_LESSONS.md` §4.1–4.4）
+
+- 检测在鱼眼原图，角点 `undistortPoints` 再求 H；去畸变图上检测会裁视野
+- 全部角点须落在去畸变图内，否则 `NOT FULLY IN VIEW`（防边缘假阳性）
+- `sequential` 只检当前 `target`；自动锁定后跳下一方向
+- `save_results` 合并上次未重标的 H（几何参数一致时才续用）
+
+## 2026-08-05 — 外参：H-QC 轴分量误判 + 180° RMS 歧义
+
+（详见 §4.5–4.6、§4.8）
+
+- 跨度改位移模长；对称性改比主奇异值；删 |H[0,0]|
+- 180° 用近边更长定向（RMS 无法区分）；中心投影安全网
+- `drawChessboardCorners` 须 float32，否则锁板存图断言失败被吞
 
 ## 2026-08-05 — 外参检测：专注 + 容错 + 自动锁定
 
