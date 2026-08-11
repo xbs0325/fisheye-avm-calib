@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Perception on stitched GPU BEV: YOLO-World open-vocab grasp localization + occupancy grid
+- Intended scene: chassis with a robot arm — 360° FOV for the arm, obstacle / path reference (not LiDAR)
+- Ego chassis overlay, 2D occupancy map beside BEV; optional YOLO-seg / VLM
+- Docs: `docs/PERCEPTION.md`; screenshot `assets/perception_bev_grasp.png`
+
 ## 0.2.0
 
 - Configurable capture via `config/camera_profile.json`; unified `avm/camera_io.py` open/probe

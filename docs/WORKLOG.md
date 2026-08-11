@@ -2,6 +2,12 @@
 
 > **AVM 部署记录**（汇报用叙事）：[`PROJECT_HISTORY.md`](PROJECT_HISTORY.md)。本文件保留按日流水。
 
+## 2026-08-11 — 0.2.1 感知：YOLO-World + 占用栅格
+
+- 场景：带机械臂的底盘；环视粗定位抓取目标 + 避障/路线参考（不发控制）
+- `perception/`：占用栅格、YOLO-World、车体 overlay、右侧 2D 占用图
+- 发布截图：`assets/perception_bev_grasp.png`
+
 ## 2026-08-06 — 成文：项目创作与部署全记录
 
 - 新增 `docs/PROJECT_HISTORY.md`（建仓动机 → GPU Web → 外参/性能/接缝 → Docker/CSI）

@@ -1,6 +1,14 @@
 # fisheye-avm-calib
 
-**v0.2.0** — Jetson 四路鱼眼环视标定与 GPU BEV 拼接（可配置分辨率 + JetPack 7.2 Docker）。
+**v0.2.1** — Jetson 四路鱼眼环视标定、GPU BEV 拼接，以及 YOLO-World 识别 / 占用栅格（机械臂底盘环视辅助）。
+
+## 本 Demo 场景
+
+本 demo 放在**带机械臂的底盘**上：四路鱼眼拼成 360° 俯视，**YOLO-World** 粗定位待抓取目标在 `base_link` 下的位置，给机械臂提供环视 FOV；同时输出占用栅格，作为**避障辅助**和**路线规划参考**（地面 2D，不是激光雷达地图）。本阶段不发底盘 / 臂控制指令。
+
+![Perception BEV：识别 + 占用](assets/perception_bev_grasp.png)
+
+左：拼接 BEV + 占用叠层 + YOLO 目标；右：同一套栅格的俯视占用图（上=前，圈为距离）。运行：`./scripts/run_perception.sh --mode grasp --target bottle`。
 
 ## 快速开始
 
@@ -15,9 +23,13 @@ source scripts/env_opencv_cuda.sh
 # 或 CLI
 ./scripts/run_wizard.sh
 ./scripts/run_wizard.sh --web
+
+# 标定后：识别 + 占用（机械臂底盘环视辅助）
+./scripts/run_perception.sh --mode grasp --target bottle
+./scripts/run_perception.sh --vlm off --mode nav --range 2.5
 ```
 
-Docker（仅 Orin / JP 7.2）：见 `docs/DOCKER.md`。
+Docker（仅 Orin / JP 7.2）：见 `docs/DOCKER.md`。感知契约与 Thor 检查表：`docs/PERCEPTION.md`。
 
 ## 说明
 
@@ -37,12 +49,14 @@ Docker（仅 Orin / JP 7.2）：见 `docs/DOCKER.md`。
 | `config/` | camera_profile / 棋盘 / placement |
 | `calib_results/*.json` | 内参 / 外参结果 |
 | `Dockerfile` / `docker-compose.yml` | JP7.2 开箱镜像 |
-| `docs/` | 管线、难点、DOCKER、WORKLOG |
+| `perception/` | BEV + YOLO-World 识别 + 占用栅格 |
+| `docs/` | 管线、难点、DOCKER、PERCEPTION、WORKLOG |
 
 ## 版本
 
 | 版本 | 说明 |
 |------|------|
+| 0.2.1 | YOLO-World 抓取粗定位 + 占用栅格 / 2D 避障参考（机械臂底盘环视） |
 | 0.2.0 | 可配置分辨率、Probe API、JP7.2 Docker |
 | 0.1.1 | 接缝精修（2b）、联合同步计数、外参 QC/180° 定向、标定教训补全 |
 | 0.1.0 | 初版：GPU Web 引导、内外参标定、BEV 拼接 |
