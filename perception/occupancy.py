@@ -90,9 +90,9 @@ def _vehicle_uv(gray: np.ndarray, *, blind_frac: float) -> Tuple[float, float, f
     u1 = (x0 + float(np.percentile(xs, 95))) / float(w)
     v0 = (y0 + float(np.percentile(ys, 5))) / float(h)
     v1 = (y0 + float(np.percentile(ys, 95))) / float(h)
-    # keep it centered-ish; pad a cell-worth so we don't eat the chassis edge
-    pad_u = 0.01
-    pad_v = 0.01
+    # keep it centered-ish; pad so chassis / stitch-hole edge is not occupied
+    pad_u = 0.025
+    pad_v = 0.025
     u0 = float(np.clip(u0 - pad_u, 0.0, 0.5))
     v0 = float(np.clip(v0 - pad_v, 0.0, 0.5))
     u1 = float(np.clip(u1 + pad_u, 0.5, 1.0))
@@ -138,14 +138,17 @@ def _pixel_score(bgr: np.ndarray, *, vehicle_uv: Tuple[float, float, float, floa
     work = cv2.blur(gray.astype(np.float32), (k, k))
     floor = _local_floor_gray(work, valid)
     dL = work - floor
-    s_dark = np.clip((-dL - 14.0) / 16.0, 0.0, 1.0)
-    s_bright = np.clip((dL - 26.0) / 22.0, 0.0, 1.0)
+    # Hex grout / tile shade is typically <20 gray; chairs/boxes are much darker.
+    s_dark = np.clip((-dL - 22.0) / 16.0, 0.0, 1.0)
+    # Specular tiles; only treat strong highlights as occupied.
+    s_bright = np.clip((dL - 38.0) / 22.0, 0.0, 1.0)
     # Gray shoes on gray tiles have weak luma; chroma still pops (skin, cloth, rubber).
     b, g, r = cv2.split(bgr.astype(np.float32))
     chroma = np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)
     ch_blur = cv2.blur(chroma, (k, k))
     floor_c = _local_floor_gray(ch_blur, valid)
-    s_ch = np.clip((ch_blur - floor_c - 8.0) / 16.0, 0.0, 1.0)
+    # Indoor tile lighting often shifts chroma ~8–14; don't treat that as an object.
+    s_ch = np.clip((ch_blur - floor_c - 18.0) / 16.0, 0.0, 1.0)
     score = np.maximum(np.maximum(s_dark, s_bright), s_ch)
     score[~valid] = 0.0
     return score, valid, gray
@@ -196,8 +199,8 @@ def estimate_occupancy(
     valid_f = valid.astype(np.float32)
     known = _pool(valid_f, nx, ny)
     mean_s = _pool(score * valid_f, nx, ny)
-    mid = ((score >= 0.28) & valid).astype(np.float32)
-    frac = _pool(mid, nx, ny)
+    strong = ((score >= 0.42) & valid).astype(np.float32)
+    frac = _pool(strong, nx, ny)
     with np.errstate(invalid="ignore", divide="ignore"):
         mean_s = np.where(known > 1e-6, mean_s / np.maximum(known, 1e-6), 0.0).astype(
             np.float32
@@ -206,8 +209,9 @@ def estimate_occupancy(
             np.float32
         )
     known_mask = known >= 0.125
-    # Mean catches chairs/boxes; fraction catches a foot that only fills part of a cell.
-    frac_gate = max(0.10, float(occ_thresh) * 0.28)
+    # Mean catches chairs/boxes. Fraction is only for a solid foot that fills part
+    # of a cell — grout/texture must not occupy a cell via a 10% speck.
+    frac_gate = max(0.22, float(occ_thresh) * 0.55)
     raw = mean_s
 
     if prev_prob is not None and prev_prob.shape == raw.shape:
@@ -220,7 +224,13 @@ def estimate_occupancy(
 
     cells = np.zeros((nx, ny), dtype=np.uint8)
     cells[~known_mask] = 255
-    cells[known_mask & ((prob >= occ_thresh) | (frac >= frac_gate))] = 1
+    cells[known_mask & ((prob >= occ_thresh) | ((frac >= frac_gate) & (prob >= occ_thresh * 0.50)))] = 1
+
+    # Isolated texture specks: drop unless the cell itself is strongly occupied.
+    occ = (cells == 1).astype(np.uint8)
+    neigh = cv2.boxFilter(occ.astype(np.float32), ddepth=-1, ksize=(3, 3), normalize=False)
+    speck = (occ == 1) & (neigh <= 2.0) & (prob < float(occ_thresh) + 0.12)
+    cells[speck] = 0
 
     # Never treat the vehicle footprint as occupied / unknown-tint
     u0, v0, u1, v1 = vehicle_uv
@@ -612,14 +622,14 @@ def render_occupancy_map(
     cells = grid.cells
     nx, ny = int(cells.shape[0]), int(cells.shape[1])
     lut = np.zeros((nx, ny, 3), dtype=np.uint8)
-    lut[cells == 0] = (200, 175, 70)
-    lut[cells == 1] = (40, 40, 210)
-    lut[cells == 255] = (210, 210, 210)
+    lut[cells == 0] = (52, 46, 40)
+    lut[cells == 1] = (40, 48, 220)
+    lut[cells == 255] = (88, 84, 80)
     occ = (cells == 1).astype(np.uint8) * 255
     if int(cv2.countNonZero(occ)) > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         occ = cv2.dilate(occ, k, iterations=1)
-        lut[occ > 0] = (40, 40, 210)
+        lut[occ > 0] = (40, 48, 220)
     img = cv2.resize(lut, (s, s), interpolation=cv2.INTER_NEAREST)
 
     cx = cy = s // 2
@@ -629,14 +639,14 @@ def render_occupancy_map(
         rad = int(round(r_m * px_per_m))
         if rad < 8 or rad >= s // 2 - 4:
             continue
-        cv2.circle(img, (cx, cy), rad, (160, 140, 90), 1, cv2.LINE_AA)
+        cv2.circle(img, (cx, cy), rad, (110, 108, 104), 1, cv2.LINE_AA)
         cv2.putText(
             img,
             f"{r_m:g}m",
             (cx + 4, max(12, cy - rad - 2)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.35,
-            (90, 70, 40),
+            (200, 198, 194),
             1,
             cv2.LINE_AA,
         )
@@ -647,14 +657,15 @@ def render_occupancy_map(
     cv2.fillConvexPoly(img, tri, (0, 210, 0))
     cv2.polylines(img, [tri], True, (220, 255, 220), 1, cv2.LINE_AA)
 
+    legend_h = 56
     for txt, pos in (
-        ("F", (cx - 5, 18)),
-        ("B", (cx - 5, s - 8)),
+        ("F", (cx - 5, 56)),
+        ("B", (cx - 5, s - legend_h - 10)),
         ("L", (8, cy + 5)),
         ("R", (s - 22, cy + 5)),
     ):
         cv2.putText(
-            img, txt, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 80, 160), 2, cv2.LINE_AA
+            img, txt, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 238, 234), 2, cv2.LINE_AA
         )
 
     if event is not None:
@@ -678,56 +689,36 @@ def render_occupancy_map(
                 cv2.circle(img, (u, v), rad, col, 2, cv2.LINE_AA)
 
     near = _nearest_cardinal_m(grid)
-    y0 = 36
+    legend_h = 56
+    overlay = img.copy()
+    cv2.rectangle(overlay, (0, s - legend_h), (s, s), (12, 10, 8), -1)
+    cv2.addWeighted(overlay, 0.50, img, 0.50, 0, img)
+    y0 = s - 32
     cv2.putText(
         img,
-        "BEV MAP  floor/occ",
-        (8, y0),
+        f"OCC  free {grid.free_frac:.0%}  {grid.resolution_m:.2f}m",
+        (10, y0),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (40, 90, 40),
+        0.42,
+        (248, 248, 248),
         1,
         cv2.LINE_AA,
     )
-    y0 += 18
-    cv2.putText(
-        img,
-        f"free={grid.free_frac:.0%}  {grid.resolution_m:.2f}m/cell",
-        (8, y0),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
-        (40, 90, 40),
-        1,
-        cv2.LINE_AA,
-    )
-    y0 += 16
-    go = ",".join(grid.free_dirs) if grid.free_dirs else "-"
-    cv2.putText(
-        img,
-        f"GO {go}",
-        (8, y0),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
-        (30, 140, 30) if grid.free_dirs else (0, 0, 180),
-        1,
-        cv2.LINE_AA,
-    )
-    y0 += 16
     bits = []
     for k, lab in (("f", "F"), ("b", "B"), ("l", "L"), ("r", "R")):
         d = near.get(k)
-        bits.append(f"{lab}:{d:.1f}m" if d is not None else f"{lab}:--")
+        bits.append(f"{lab} {d:.1f}m" if d is not None else f"{lab} --")
     cv2.putText(
         img,
-        " ".join(bits),
-        (8, y0),
+        "  ".join(bits),
+        (10, s - 12),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.38,
-        (40, 90, 160),
+        0.40,
+        (230, 210, 64),
         1,
         cv2.LINE_AA,
     )
-    cv2.line(img, (0, 0), (0, s - 1), (80, 80, 80), 2)
+    cv2.line(img, (0, 0), (0, s - 1), (48, 118, 255), 3)
     return img
 
 

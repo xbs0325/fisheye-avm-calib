@@ -19,13 +19,54 @@ Protocol (stdin / stdout, line-oriented UTF-8):
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
-from perception.schema import NAV_PROMPT, grasp_prompt
+from perception.schema import (
+    CAPTION_PROMPT,
+    NAV_PROMPT,
+    finalize_vlm_json,
+    grasp_prompt,
+)
+
+# HuggingFace logs docstring checks as "[ERROR] …" on stdout by default,
+# which poisons the READY / OK / END line protocol.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _keep_stdout_for_protocol() -> None:
+    warnings.filterwarnings("ignore")
+    stderr = logging.StreamHandler(sys.stderr)
+    stderr.setLevel(logging.CRITICAL)
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(stderr)
+    root.setLevel(logging.CRITICAL)
+    for name in ("transformers", "huggingface_hub", "accelerate"):
+        log = logging.getLogger(name)
+        log.handlers.clear()
+        log.addHandler(stderr)
+        log.setLevel(logging.CRITICAL)
+        log.propagate = False
+    try:
+        from transformers.utils import logging as hf_logging
+
+        hf_logging.set_verbosity_error()
+        hf_logging.disable_progress_bar()
+        hf_log = hf_logging.get_logger()
+        hf_log.setLevel(logging.CRITICAL)
+        hf_log.handlers.clear()
+        hf_log.addHandler(stderr)
+        hf_log.propagate = False
+    except Exception:
+        pass
 
 DEFAULT_MODELS = Path(
     os.environ.get(
@@ -92,7 +133,14 @@ class Qwen3VLInferencer:
                 if hasattr(gc, key):
                     setattr(gc, key, None)
 
-    def generate(self, path: Path, prompt: str, max_new_tokens: int) -> tuple[str, float]:
+    def generate(
+        self,
+        path: Path,
+        prompt: str,
+        max_new_tokens: int,
+        *,
+        json_prefill: bool = False,
+    ) -> tuple[str, float]:
         import torch
         from PIL import Image
         from qwen_vl_utils import process_vision_info
@@ -116,10 +164,10 @@ class Qwen3VLInferencer:
                 ],
             }
         ]
-        # Prefill "{" so the model does not start with ```json (truncates + parse fail)
+        # ANALYZE JSON prefills "{"; CAPTION must not, or the model dumps JSON.
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
-        ) + "{"
+        ) + ("{" if json_prefill else "")
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(
             text=[text],
@@ -140,12 +188,49 @@ class Qwen3VLInferencer:
         if gc is not None and getattr(gc, "eos_token_id", None) is not None:
             e = gc.eos_token_id
             eos_ids = list(e) if isinstance(e, (list, tuple)) else [int(e)]
+        # Do NOT treat "}" as EOS. Nested objects close first and truncate JSON.
+        # Cheap token-id brace count — decoding every token on Thor costs seconds.
         tok = getattr(self.processor, "tokenizer", None)
-        if tok is not None:
-            for s in ("}",):
-                ids = tok.encode(s, add_special_tokens=False)
-                if len(ids) == 1 and int(ids[0]) not in eos_ids:
-                    eos_ids.append(int(ids[0]))
+        prompt_len = int(inputs["input_ids"].shape[-1])
+        stop_list = None
+        if json_prefill and tok is not None:
+            try:
+                from transformers import StoppingCriteria, StoppingCriteriaList
+
+                open_ids: set[int] = set()
+                close_ids: set[int] = set()
+                for s in ("{", '{"'):
+                    ids = tok.encode(s, add_special_tokens=False)
+                    if len(ids) == 1:
+                        open_ids.add(int(ids[0]))
+                for s in ("}", '"}'):
+                    ids = tok.encode(s, add_special_tokens=False)
+                    if len(ids) == 1:
+                        close_ids.add(int(ids[0]))
+                start_depth = 1
+
+                class _JsonRootCloseStop(StoppingCriteria):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self._prompt_len = prompt_len
+                        self._open = open_ids
+                        self._close = close_ids
+                        self._depth0 = start_depth
+
+                    def __call__(self, input_ids, scores, **kwargs) -> bool:  # noqa: ARG002
+                        depth = self._depth0
+                        for tid in input_ids[0, self._prompt_len :].tolist():
+                            if tid in self._open:
+                                depth += 1
+                            elif tid in self._close:
+                                depth -= 1
+                            if depth <= 0:
+                                return True
+                        return False
+
+                stop_list = StoppingCriteriaList([_JsonRootCloseStop()])
+            except Exception:
+                stop_list = None
         gen_kw: dict[str, Any] = {
             "max_new_tokens": int(max_new_tokens),
             "do_sample": False,
@@ -153,6 +238,8 @@ class Qwen3VLInferencer:
         }
         if eos_ids:
             gen_kw["eos_token_id"] = eos_ids
+        if stop_list is not None:
+            gen_kw["stopping_criteria"] = stop_list
         t0 = time.time()
         with torch.inference_mode():
             generated = self.model.generate(**inputs, **gen_kw)
@@ -169,8 +256,8 @@ class Qwen3VLInferencer:
             clean_up_tokenization_spaces=False,
         )
         one = (decoded[0] if decoded else "").strip().replace("\n", " ")
-        if not one.startswith("{"):
-            one = "{" + one
+        if json_prefill:
+            one = finalize_vlm_json(one)
         del inputs, generated, trimmed
         return one, ms
 
@@ -201,9 +288,10 @@ def main() -> int:
     ap.add_argument("--models", type=Path, default=None)
     ap.add_argument("--max-side", type=int, default=512)
     ap.add_argument("--max-new-tokens", type=int, default=128)
-    ap.add_argument("--prompt", default=NAV_PROMPT, help="CAPTION fallback prompt")
+    ap.add_argument("--prompt", default=CAPTION_PROMPT, help="CAPTION prompt")
     args = ap.parse_args()
     models_dir = Path(args.models or DEFAULT_MODELS)
+    _keep_stdout_for_protocol()
 
     try:
         sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
@@ -243,7 +331,9 @@ def main() -> int:
                 continue
             prompt = _prompt_for(mode, target, args.prompt, occ_az=occ_az)
             try:
-                text, ms = vlm.generate(path, prompt, args.max_new_tokens)
+                text, ms = vlm.generate(
+                    path, prompt, args.max_new_tokens, json_prefill=True
+                )
                 print(f"OK {ms:.0f}", flush=True)
                 print(text or "{}", flush=True)
                 print("END", flush=True)
@@ -254,7 +344,9 @@ def main() -> int:
         if line.startswith("CAPTION "):
             path = Path(line[8:].strip())
             try:
-                text, ms = vlm.generate(path, args.prompt, args.max_new_tokens)
+                text, ms = vlm.generate(
+                    path, args.prompt, args.max_new_tokens, json_prefill=False
+                )
                 print(f"OK {ms:.0f}", flush=True)
                 print(text or "(empty)", flush=True)
                 print("END", flush=True)

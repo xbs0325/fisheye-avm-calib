@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# YOLO-World v2 → models/perception/
+# YOLO-World v2 → models/perception/yolov8s-worldv2.pt
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DST="${ROOT}/models/perception"
-VENV_PY="${PERCEPTION_VENV_PYTHON:-${HOME}/leucus/.venv-worldmm/bin/python}"
+PT="${DST}/yolov8s-worldv2.pt"
+URL="${YOLO_WORLD_URL:-https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt}"
 mkdir -p "${DST}"
-unset HF_ENDPOINT || true
-export PYTHONNOUSERSITE=1 MPLBACKEND=Agg HF_HUB_DISABLE_XET=1
-export PYTHONPATH=""
 
-echo "[download] YOLO-World v2 → ${DST}/yolov8s-worldv2.pt"
-"${VENV_PY}" - <<PY
-from pathlib import Path
-from ultralytics import YOLO
-p = Path("${DST}/yolov8s-worldv2.pt")
-YOLO(str(p) if p.is_file() else "yolov8s-worldv2.pt")
-print("yolo-world", p.is_file(), p)
-PY
+if [[ -f "${PT}" && -s "${PT}" ]]; then
+  echo "[download] already have ${PT} ($(du -h "${PT}" | cut -f1))"
+  exit 0
+fi
+
+echo "[download] YOLO-World v2 → ${PT}"
+if command -v curl >/dev/null 2>&1; then
+  curl -L --fail --retry 3 --retry-delay 2 -o "${PT}" "${URL}"
+else
+  wget -O "${PT}" "${URL}"
+fi
+ls -lh "${PT}"
 echo "[download] done"

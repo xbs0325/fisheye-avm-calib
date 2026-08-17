@@ -81,6 +81,7 @@ class WebCalibSession:
         self.detect_scan_width = 1920  # 兼容旧状态字段；始终强制等于 max_width
         self.detect_duty = 0.25
         self.detect_use_sb = True
+        self.detect_photo_retry = True
         # 专注 / 容错 / 自动锁定
         self.auto_lock = True
         self.streak_reset_misses = 2
@@ -124,6 +125,7 @@ class WebCalibSession:
         self.detect_scan_width = self.detect_max_width
         self.detect_duty = float(s.get("detect_duty", 0.5))
         self.detect_use_sb = bool(s.get("detect_use_sb", True))
+        self.detect_photo_retry = bool(s.get("detect_photo_retry", True))
         self.detect_try_scales = list(s.get("detect_try_scales") or [1.0, 0.75, 0.5])
         self.stable_need = int(s.get("stable_frames", 10))
         self.auto_lock = bool(s.get("auto_lock", True))
@@ -153,6 +155,8 @@ class WebCalibSession:
             self.pattern,
             max_width=self.detect_max_width,
             try_scales=self.detect_try_scales,
+            use_sb=self.detect_use_sb,
+            photo_retry=self.detect_photo_retry,
         )
 
     def status(self) -> dict[str, Any]:
@@ -175,6 +179,7 @@ class WebCalibSession:
             "detect_scan_width": self.detect_scan_width,
             "detect_interval_ms": self.detect_interval_ms,
             "detect_duty": self.detect_duty,
+            "detect_photo_retry": getattr(self, "detect_photo_retry", True),
             "detect_ms": {k: round(v, 1) for k, v in self._det_ms.items()},
             "detect_stage": dict(self._det_stage),
             "focus": self._focus,
@@ -524,6 +529,7 @@ class WebCalibSession:
                     scan_width=self.detect_max_width,
                     refine_width=self.detect_max_width,
                     use_sb=self.detect_use_sb,
+                    photo_retry=self.detect_photo_retry,
                 )
             except Exception as exc:
                 LOG.warn(f"detect {d} 异常: {exc}")

@@ -48,7 +48,14 @@ def _cuda_env() -> dict[str, str]:
             prefix = alt
     py = f"python{sys.version_info.major}.{sys.version_info.minor}"
     lib = prefix / "lib"
-    site = lib / py / "site-packages"
+    site = next(
+        (
+            p
+            for p in (lib / py / "dist-packages", lib / py / "site-packages")
+            if p.is_dir()
+        ),
+        lib / py / "site-packages",
+    )
     env["OPENCV_CUDA_PREFIX"] = str(prefix)
     if lib.is_dir():
         ld = env.get("LD_LIBRARY_PATH", "")

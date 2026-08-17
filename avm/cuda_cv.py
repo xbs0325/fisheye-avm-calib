@@ -54,14 +54,22 @@ def _candidate_prefixes() -> list[Path]:
     return uniq
 
 
-def bootstrap_opencv_cuda() -> Optional[Path]:
-    """Insert CUDA OpenCV site-packages early. Returns prefix or None."""
+def _cv2_python_dirs(prefix: Path) -> list[Path]:
     py = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    return [
+        prefix / "lib" / py / "dist-packages",
+        prefix / "lib" / py / "site-packages",
+    ]
+
+
+def bootstrap_opencv_cuda() -> Optional[Path]:
+    """Insert CUDA OpenCV site/dist-packages early. Returns prefix or None."""
     for prefix in _candidate_prefixes():
-        site = prefix / "lib" / py / "site-packages"
-        if not site.is_dir():
-            continue
-        if not any(site.glob("cv2*")):
+        site = next(
+            (p for p in _cv2_python_dirs(prefix) if p.is_dir() and any(p.glob("cv2*"))),
+            None,
+        )
+        if site is None:
             continue
         lib = prefix / "lib"
         os.environ.setdefault("OPENCV_CUDA_PREFIX", str(prefix))

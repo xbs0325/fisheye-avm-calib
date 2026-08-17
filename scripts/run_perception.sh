@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # BEV 感知 Demo（只动 perception；不改标定）
-# 默认：占用栅格；grasp 默认 YOLO-World GPU FP16（VLM 关）
+# 默认：占用栅格 + YOLO-World 定位；nav 下 VLM 只做场景口述（不参与坐标）
 #
 # 用法：
+#   ./scripts/run_perception.sh --mode nav --range 2.5 --vlm qwen3vl-2b
 #   ./scripts/run_perception.sh --vlm off --mode nav --range 2.5
 #   ./scripts/run_perception.sh --mode grasp --target bottle
-#   ./scripts/run_perception.sh --mode nav --range 2.5 --vlm qwen3vl-2b
+#   ./scripts/run_perception.sh --no-ov --vlm qwen3vl-2b   # 只要口述，不要检测框
 #   ./scripts/run_perception.sh --no-occ
-#   ./scripts/run_perception.sh --seg   # 实验性，不推荐
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091

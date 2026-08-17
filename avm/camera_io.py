@@ -24,8 +24,8 @@ _DEFAULT_PROFILE: dict[str, Any] = {
     "backend": "v4l2",
     "gst_pipeline_template": "",
     "cameras": {
-        "front": {"device": 2},
-        "back": {"device": 0},
+        "front": {"device": 0},
+        "back": {"device": 2},
         "left": {"device": 3},
         "right": {"device": 1},
     },

@@ -69,10 +69,12 @@ class AnalyzeWorker:
         on_result: Optional[Callable[[PerceptionEvent], None]] = None,
         debug_input_path: Optional[Path] = None,
         occ_veto: Optional[Callable[[PerceptionEvent], PerceptionEvent]] = None,
+        task: str = "analyze",
     ):
         self.vlm_name = vlm_name
         self.models_dir = Path(models_dir or DEFAULT_MODELS)
         self.mode = "grasp" if mode == "grasp" else "nav"
+        self.task = "caption" if task == "caption" else "analyze"
         self.grasp_target = grasp_target or "object"
         self.max_side = int(max_side)
         self.max_new_tokens = int(max_new_tokens)
@@ -121,7 +123,8 @@ class AnalyzeWorker:
         """True while this process should not run OpenCV-CUDA (Jetson GPU lock)."""
         with self._lock:
             loading = bool(self._load_started and not self._enabled and self._error is None)
-            return loading or self._busy
+            # Infer can overlap YOLO + CUDA stitch on Thor; only serialize weight load.
+            return loading
 
     @property
     def event(self) -> Optional[PerceptionEvent]:
@@ -212,15 +215,27 @@ class AnalyzeWorker:
             target=self._drain_stderr, name="perception-vlm-stderr", daemon=True
         ).start()
 
-        line = self._proc.stdout.readline()
+        # transformers may print "[ERROR] …not documented" on stdout
+        # (same pattern as YOLO/seg workers). Skip until READY / ERR.
+        deadline = time.time() + 300.0
+        line = ""
+        while time.time() < deadline:
+            line = self._proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            if line == "READY" or line.startswith("ERR "):
+                break
+            print(f"[VLM stdout] {line}", flush=True)
         if not line:
             err = self._proc.poll()
             raise RuntimeError(
                 f"VLM worker exited early (code={err}). "
                 f"Check PERCEPTION_VENV_PYTHON={self.venv_python}"
             )
-        line = line.strip()
-        if line.startswith("ERR"):
+        if line.startswith("ERR "):
             raise RuntimeError(line[4:].strip() or line)
         if line != "READY":
             raise RuntimeError(f"VLM worker unexpected: {line!r}")
@@ -315,7 +330,9 @@ class AnalyzeWorker:
                 except Exception:
                     pass
 
-            if self.mode == "grasp":
+            if self.task == "caption":
+                cmd = f"CAPTION {path}\n"
+            elif self.mode == "grasp":
                 cmd = f"ANALYZE {path} grasp {self.grasp_target}"
                 if occ_az:
                     cmd += f" ::{occ_az}"
@@ -328,11 +345,21 @@ class AnalyzeWorker:
                     raise RuntimeError(f"VLM worker exited (code={proc.returncode})")
                 proc.stdin.write(cmd)
                 proc.stdin.flush()
-                header = proc.stdout.readline()
+                header = ""
+                reply_deadline = time.time() + 180.0
+                while time.time() < reply_deadline:
+                    header = proc.stdout.readline()
+                    if not header:
+                        break
+                    header = header.strip()
+                    if not header:
+                        continue
+                    if header.startswith("OK ") or header.startswith("ERR "):
+                        break
+                    print(f"[VLM stdout] {header}", flush=True)
                 if not header:
                     raise RuntimeError("VLM worker closed stdout")
-                header = header.strip()
-                if header.startswith("ERR"):
+                if header.startswith("ERR "):
                     raise RuntimeError(header[4:].strip() or header)
                 if not header.startswith("OK"):
                     raise RuntimeError(f"unexpected worker reply: {header!r}")
@@ -344,6 +371,15 @@ class AnalyzeWorker:
                     raise RuntimeError(f"expected END, got {end!r}")
 
             event = parse_vlm_response(text, mode=self.mode, infer_ms=ms)
+            if self.task == "caption":
+                # Free-form text is the product; don't require JSON schema.
+                if not (event.summary or "").strip():
+                    event.summary = (text or "").strip()[:240]
+                event.valid = bool(event.summary)
+                event.error = None
+                if event.nav is not None:
+                    event.nav.obstacles = []
+                    event.nav.free_dirs = []
             event = enrich_event(
                 event,
                 canvas_size=self.canvas_size,
@@ -375,7 +411,7 @@ class AnalyzeWorker:
                     if event.grasp.turn_hint:
                         xy += f" {event.grasp.turn_hint}"
             print(
-                f"[VLM {ms:.0f}ms valid={event.valid}] {event.summary[:80]}{xy} | {text[:100]}",
+                f"[VLM {ms:.0f}ms valid={event.valid}] {event.summary[:160]}{xy}",
                 flush=True,
             )
             if self.on_result is not None:

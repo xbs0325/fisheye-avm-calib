@@ -1,6 +1,6 @@
 {
   "_说明": "Web/CLI 标定运行参数（可被网页改写）。检测在后台线程全分辨率低频运行，不阻塞 GPU 推流。",
-  "_detect_说明": "每次直接按 detect_max_width 检测，不做低分辨率门控；interval 控制提交频率，duty 控制 CPU 平均占空比。",
+  "_detect_说明": "每次直接按 detect_max_width 检测，不做低分辨率门控；interval 控制提交频率，duty 控制 CPU 平均占空比。detect_photo_retry：原图 miss 后用伽马/CLAHE 再检，角点仍在原图亚像素精修，不改几何。",
   "_lock_说明": "检出后焦点钉在该路；连续 stable_frames 次命中即自动连拍求 H 并锁定。auto_lock=false 则退回手动 SPACE。",
   "_seq_说明": "sequential=true 时一次只标一路，锁定后自动跳下一路；四路都摆板也不会互相抢。inview_margin_px 是「整块板必须落在去畸变图内」的边距，防止鱼眼边缘瞥到的半块板被误锁。",
   "sequential": true,
@@ -11,6 +11,7 @@
   "detect_duty": 0.5,
   "detect_try_scales": [1.0, 0.75, 0.5],
   "detect_use_sb": true,
+  "detect_photo_retry": true,
   "auto_lock": true,
   "stable_frames": 10,
   "streak_reset_misses": 2,

@@ -97,25 +97,24 @@ def open_preview_camera(index):
 
 
 def detect_corners(gray, pattern_size, scale=1.0):
-    flags = (cv2.CALIB_CB_ADAPTIVE_THRESH
-             + cv2.CALIB_CB_FAST_CHECK
-             + cv2.CALIB_CB_NORMALIZE_IMAGE)
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-    if scale < 1.0:
-        small = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
-        ret, corners = cv2.findChessboardCorners(small, pattern_size, flags)
-        if not ret:
-            return False, None
-        corners = corners.astype(np.float32) / np.float32(scale)
-    else:
-        ret, corners = cv2.findChessboardCorners(gray, pattern_size, flags)
-        if not ret:
-            return False, None
-        corners = corners.astype(np.float32)
+    try:
+        from detect_board_hires import find_board_corners
+    except ImportError:
+        from avm.detect_board_hires import find_board_corners
 
-    # OpenCV5 可能返回 (N,2)；fisheye.calibrate 需要 CV_32FC2 → (N,1,2)
-    corners = np.asarray(corners, dtype=np.float32).reshape(-1, 1, 2)
-    corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    work = gray
+    if scale < 1.0:
+        work = cv2.resize(
+            gray, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA
+        )
+    corners = find_board_corners(work, pattern_size, use_sb=True, photo_retry=True)
+    if corners is None:
+        return False, None
+    corners = np.asarray(corners, dtype=np.float32)
+    if scale < 1.0:
+        corners = corners / np.float32(scale)
+        corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
     corners = np.asarray(corners, dtype=np.float32).reshape(-1, 1, 2)
     return True, corners
 

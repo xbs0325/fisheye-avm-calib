@@ -52,7 +52,7 @@ from perception.ego_overlay import (  # noqa: E402
     load_ego_sprite,
     overlay_ego,
 )
-from perception.viz import draw_hud  # noqa: E402
+from perception.viz import draw_hud, finish_film_frame  # noqa: E402
 
 
 def _fold_gain_weights(
@@ -76,6 +76,61 @@ def _fold_gain_weights(
             [w * float(g[0]), w * float(g[1]), w * float(g[2])], axis=-1
         ).astype(np.float32)
     return out
+
+
+def _summary_bit(ev: PerceptionEvent | None) -> str:
+    if ev is None:
+        return ""
+    if ev.grasp is not None and (ev.grasp.notes or "").strip():
+        return ev.grasp.notes.strip()
+    return (ev.summary or "").strip()
+
+
+def _compose_event(
+    *,
+    mode: str,
+    geom: PerceptionEvent | None,
+    ov_ev: PerceptionEvent | None,
+    vlm_ev: PerceptionEvent | None,
+    vlm_boxes: bool,
+) -> PerceptionEvent | None:
+    """Occupancy = space, YOLO = boxes/xy, VLM = caption (not fake geometry)."""
+    box_ev = ov_ev if ov_ev is not None else (vlm_ev if vlm_boxes else None)
+    base = geom or box_ev or vlm_ev
+    if base is None:
+        return None
+    nav = deepcopy(geom.nav) if geom is not None and geom.nav is not None else None
+    if box_ev is not None and box_ev.nav is not None:
+        extra = [o for o in box_ev.nav.obstacles if o.label != "occ"]
+        if nav is None:
+            nav = deepcopy(box_ev.nav)
+        else:
+            nav.obstacles = list(nav.obstacles) + extra
+    grasp = None
+    if mode == "grasp" and box_ev is not None and box_ev.grasp is not None:
+        grasp = deepcopy(box_ev.grasp)
+    bits: list[str] = []
+    for ev in (geom, ov_ev, vlm_ev):
+        s = _summary_bit(ev)
+        if s and s not in bits:
+            bits.append(s)
+    valid = bool(
+        (geom is not None and geom.valid)
+        or (box_ev is not None and box_ev.valid)
+        or (vlm_ev is not None and vlm_ev.valid)
+    )
+    return PerceptionEvent(
+        schema_version=base.schema_version,
+        frame_id=base.frame_id,
+        stamp_s=base.stamp_s,
+        mode=mode,
+        valid=valid,
+        infer_ms=float(geom.infer_ms if geom is not None else base.infer_ms),
+        summary=" | ".join(bits),
+        raw_text=(vlm_ev.raw_text if vlm_ev is not None else base.raw_text),
+        nav=nav,
+        grasp=grasp,
+    )
 
 
 def _push_weights(
@@ -148,7 +203,7 @@ def main() -> None:
     )
     ap.add_argument("--blend-power", type=float, default=4.0)
     ap.add_argument("--no-gain", action="store_true")
-    ap.add_argument("--display-size", type=int, default=560)
+    ap.add_argument("--display-size", type=int, default=640)
     ap.add_argument(
         "--mode",
         choices=["nav", "grasp"],
@@ -171,7 +226,7 @@ def main() -> None:
         dest="ov",
         action="store_true",
         default=None,
-        help="YOLO-World 开放词汇检测（grasp 默认开）",
+        help="YOLO-World 开放词汇检测（默认开：框 + 米制坐标）",
     )
     ap.add_argument(
         "--no-ov",
@@ -305,7 +360,7 @@ def main() -> None:
         "--max-new-tokens",
         type=int,
         default=96,
-        help="VLM 生成上限（语义短 JSON；过小会截断导致 valid=False）",
+        help="VLM 生成上限（caption 两三句；analyze JSON 过小会截断）",
     )
     ap.add_argument("--models", type=Path, default=None)
     ap.add_argument("--no-window", action="store_true")
@@ -320,7 +375,7 @@ def main() -> None:
     if args.mode == "grasp" and "--max-new-tokens" not in sys.argv:
         args.max_new_tokens = min(int(args.max_new_tokens), 64)
     if args.ov is None:
-        args.ov = args.mode == "grasp"
+        args.ov = True
     if args.mode == "grasp" and "--vlm" not in sys.argv:
         args.vlm = "off"
     ov_dev = str(args.ov_device).strip().lower()
@@ -463,20 +518,29 @@ def main() -> None:
             debug_input_path=out_dir / "vlm_input.jpg",
             # Grasp targets (mouse etc.) are often <1 occ cell; veto was dropping real hits
             occ_veto=None,
+            task="caption" if args.mode == "nav" else "analyze",
         )
         gap = (
             float(args.analyze_interval)
             if args.analyze_interval > 0
             else (3.0 if args.analyze_interval >= 0 else -1.0)
         )
+        role = "caption" if args.mode == "nav" else "analyze"
         print(
-            f"  VLM {args.vlm}  target={args.target}  "
+            f"  VLM {args.vlm}  {role}  target={args.target}  "
             f"max_side={args.max_side} tokens={args.max_new_tokens} "
             f"interval={gap}s — 后台加载，先出画面"
             + (" (manual a)" if gap < 0 else "")
         )
     else:
         print("  VLM disabled (--vlm off)")
+
+    if use_occ or args.ov or args.vlm != "off":
+        print(
+            "  fusion: occ=通行空间  YOLO-World=框/米制坐标  "
+            f"VLM={'口述(可与YOLO并行)' if args.vlm != 'off' and args.mode == 'nav' else ('analyze' if args.vlm != 'off' else 'off')}",
+            flush=True,
+        )
 
     gains = {d: np.ones(3, dtype=np.float32) for d in DIRECTIONS}
     stitch_gains = {d: np.ones(3, dtype=np.float32) for d in DIRECTIONS}
@@ -485,7 +549,7 @@ def main() -> None:
     blend_power = args.blend_power
     frame_count = 0
     fps_smooth = 0.0
-    window_name = "Perception BEV"
+    window_name = "Surround View"
     preview_path = out_dir / "preview.jpg"
     use_window = not args.no_window
     window_ready = False
@@ -590,13 +654,12 @@ def main() -> None:
                 (ov_worker is not None and ov_worker.holds_gpu)
                 or (worker is not None and worker.holds_gpu)
             )
-            # PyTorch weight load vs OpenCV-CUDA on one Orin: pause GPU stitch,
-            # keep CPU stitch so the window still updates.
+            # Weight load vs OpenCV-CUDA: pause GPU stitch. Infer may overlap.
             if gpu_hold and not cuda_paused:
                 cuda_paused = True
                 for p in pipelines.values():
                     p.use_cuda = False
-                print("  GPU busy (YOLO load) — CPU stitch, video stays live", flush=True)
+                print("  GPU busy (detector/VLM) — CPU stitch, video stays live", flush=True)
             elif not gpu_hold and cuda_paused:
                 cuda_paused = False
                 for d, on in pipe_cuda.items():
@@ -627,59 +690,20 @@ def main() -> None:
 
             frame_count += 1
 
-            # Geometry: occ/seg grid + YOLO-World boxes (real xy) / optional VLM
+            # Occupancy = free/occ space; YOLO-World = boxes + xy;
+            # VLM caption = human-readable notes (not used as geometry).
             geom = latest_seg or latest_occ
-            grasp_ev = latest_ov or latest_vlm
-            event = geom or grasp_ev or (worker.event if worker else None) or bus.latest()
-            if geom is not None and grasp_ev is not None:
-                vlm_bit = ""
-                if grasp_ev.grasp is not None:
-                    vlm_bit = (grasp_ev.grasp.notes or "").strip()
-                elif grasp_ev.summary:
-                    vlm_bit = grasp_ev.summary.strip()
-                geom_sum = (geom.summary or "").strip()
-                if vlm_bit and vlm_bit != geom_sum:
-                    summary = f"{geom_sum} | {vlm_bit}" if geom_sum else vlm_bit
-                else:
-                    summary = geom_sum
-                grasp = (
-                    deepcopy(grasp_ev.grasp)
-                    if args.mode == "grasp" and grasp_ev.grasp is not None
-                    else None
-                )
-                nav = deepcopy(geom.nav) if geom.nav is not None else None
-                if nav is not None and grasp_ev.nav is not None:
-                    extra = [
-                        o
-                        for o in grasp_ev.nav.obstacles
-                        if o.label != "occ"
-                    ]
-                    nav.obstacles = list(nav.obstacles) + extra
-                event = PerceptionEvent(
-                    schema_version=geom.schema_version,
-                    frame_id=geom.frame_id,
-                    stamp_s=geom.stamp_s,
-                    mode=args.mode,
-                    valid=geom.valid or grasp_ev.valid,
-                    infer_ms=geom.infer_ms,
-                    summary=summary,
-                    raw_text=geom.raw_text,
-                    nav=nav,
-                    grasp=grasp,
-                )
-            elif args.mode == "grasp" and grasp_ev is not None:
-                event = PerceptionEvent(
-                    schema_version=grasp_ev.schema_version,
-                    frame_id=grasp_ev.frame_id,
-                    stamp_s=grasp_ev.stamp_s,
-                    mode="grasp",
-                    valid=grasp_ev.valid,
-                    infer_ms=grasp_ev.infer_ms,
-                    summary=grasp_ev.summary,
-                    raw_text=grasp_ev.raw_text,
-                    nav=deepcopy(grasp_ev.nav) if grasp_ev.nav else None,
-                    grasp=deepcopy(grasp_ev.grasp) if grasp_ev.grasp else None,
-                )
+            event = _compose_event(
+                mode=args.mode,
+                geom=geom,
+                ov_ev=latest_ov,
+                vlm_ev=latest_vlm,
+                vlm_boxes=bool(
+                    worker is not None and getattr(worker, "task", "") == "analyze"
+                ),
+            )
+            if event is None:
+                event = (worker.event if worker else None) or bus.latest()
             src = event.grasp.source if event is not None and event.grasp else ""
             if (
                 args.mode == "grasp"
@@ -724,11 +748,12 @@ def main() -> None:
 
             if seg_worker and seg_worker.enabled:
                 seg_worker.request(result)
-            if ov_worker and ov_worker.enabled and not gpu_hold:
+            ov_loading = bool(ov_worker is not None and ov_worker.loading)
+            vlm_loading = bool(worker is not None and worker.loading)
+            if ov_worker and ov_worker.enabled and not vlm_loading:
                 ov_worker.request(result)
             if worker and worker.enabled and args.analyze_interval >= 0:
                 now = time.time()
-                # 0 used to mean "immediately again" and starved CUDA stitch.
                 gap = (
                     float(args.analyze_interval)
                     if args.analyze_interval > 0
@@ -738,7 +763,12 @@ def main() -> None:
                 cooldown_ok = since_ready >= gap and (
                     last_vlm_done_t <= 0 or (now - last_vlm_done_t) >= gap
                 )
-                if cooldown_ok and not worker.busy and stitch_ms < 90.0:
+                if (
+                    cooldown_ok
+                    and not worker.busy
+                    and not ov_loading
+                    and stitch_ms < 90.0
+                ):
                     worker.request(result, occ_az=az_hint)
 
             ds = int(args.display_size)
@@ -746,9 +776,11 @@ def main() -> None:
             if occ_grid is not None:
                 if event is not None:
                     stamp_detections_on_grid(occ_grid, event)
-                display = overlay_occupancy(
-                    display, occ_grid, draw_vehicle_box=ego_sprite is None
-                )
+                # Occupancy paint lives on the right map; left stays the raw stitch.
+                if not show_occ_map:
+                    display = overlay_occupancy(
+                        display, occ_grid, draw_vehicle_box=ego_sprite is None
+                    )
             scale_disp = float(args.scale) * (ds / float(canvas[0]))
             if ego_sprite is not None:
                 if ego_box is None:
@@ -773,9 +805,10 @@ def main() -> None:
                 )
             loop_dt = time.perf_counter() - loop_t0
             fps_smooth = fps_smooth * 0.9 + (1.0 / max(loop_dt, 0.001)) * 0.1
+            fps_now = fps_smooth if fps_smooth > 0 else (1.0 / max(loop_dt, 0.001))
             display = draw_hud(
                 display,
-                fps_val=fps_smooth if fps_smooth > 0 else (1.0 / max(loop_dt, 0.001)),
+                fps_val=fps_now,
                 blend_power=blend_power,
                 gain_enabled=gain_enabled,
                 canvas_size=(ds, ds),
@@ -793,6 +826,15 @@ def main() -> None:
                         render_occupancy_map(occ_grid, event=event, size=ds),
                     ]
                 )
+            display = finish_film_frame(
+                display,
+                fps_val=fps_now,
+                mode=args.mode,
+                range_m=float(args.range),
+                status_line=status_line,
+                event=event,
+                grasp_target=args.target if args.mode == "grasp" else "",
+            )
 
             key = 0xFF
             if use_window and window_ready:
@@ -827,8 +869,10 @@ def main() -> None:
                 break
             if key == ord("s"):
                 path = out_dir / f"bev_{frame_count:04d}.jpg"
-                cv2.imwrite(str(path), result)
-                print(f"  [saved] {path}")
+                cv2.imwrite(str(path), display)
+                raw_path = out_dir / f"bev_{frame_count:04d}_raw.jpg"
+                cv2.imwrite(str(raw_path), result)
+                print(f"  [saved] {path}  (raw {raw_path.name})")
             if key == ord("a") and worker:
                 if not worker.enabled:
                     print("  [vlm] still loading")

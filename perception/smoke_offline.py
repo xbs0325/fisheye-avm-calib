@@ -34,6 +34,8 @@ from perception.schema import (  # noqa: E402
     NavResult,
     Obstacle,
     PerceptionEvent,
+    finalize_vlm_json,
+    generated_json_closed,
     grasp_prompt,
     parse_nav_payload,
     parse_vlm_response,
@@ -327,6 +329,19 @@ def test_occupancy_hits_small_shoe() -> None:
     assert int((grid.cells == 1).sum()) >= 1
 
 
+def test_occupancy_ignores_hex_tile_texture() -> None:
+    img = np.full((400, 400, 3), 158, dtype=np.uint8)
+    img[170:230, 170:230] = 8
+    grout = 132
+    for y in range(0, 400, 16):
+        img[y : y + 2, :] = grout
+    for x in range(0, 400, 18):
+        img[:, x : x + 2] = grout
+    img[..., 0] = np.clip(img[..., 0].astype(np.int16) - 10, 0, 255).astype(np.uint8)
+    grid, _ = estimate_occupancy(img, scale_px_per_meter=80.0, resolution_m=0.20)
+    assert float((grid.cells == 1).mean()) < 0.03
+
+
 def test_ego_overlay_centers() -> None:
     bev = np.full((200, 200, 3), 160, dtype=np.uint8)
     bev[78:122, 78:122] = 8
@@ -439,6 +454,24 @@ def test_parse_fallback() -> None:
     assert empty.error == "json_parse_failed"
 
 
+def test_nested_json_not_cut_at_first_brace() -> None:
+    inner = '"obstacles":[{"label":"person","azimuth":"fr","conf":0.7}'
+    assert not generated_json_closed(inner)
+    assert generated_json_closed(inner + '],"free_dirs":["front"]}')
+    raw = '{"obstacles":[{"label":"person","azimuth":"fr","conf":0.7}'
+    fixed = finalize_vlm_json(raw)
+    ev = parse_vlm_response(fixed, mode="nav")
+    assert ev.valid
+    assert ev.nav is not None
+    assert ev.nav.obstacles[0].label == "person"
+    extra = raw + '],"free_dirs":["front"],"uncertain":[]} trailing'
+    assert finalize_vlm_json(extra).endswith("}")
+    parsed = parse_vlm_response(extra, mode="nav")
+    assert parsed.valid
+    assert parsed.nav is not None
+    assert parsed.nav.free_dirs == ["front"]
+
+
 def main() -> int:
     test_grasp_prompt_format()
     test_coord_roundtrip()
@@ -459,6 +492,7 @@ def main() -> int:
     test_occupancy_strict_on_flat_floor()
     test_occupancy_hits_solid_blob()
     test_occupancy_hits_small_shoe()
+    test_occupancy_ignores_hex_tile_texture()
     test_ego_overlay_centers()
     test_ego_overlay_covers_tilted_hole()
     test_ego_overlay_locked_box_does_not_follow_hole()
@@ -467,6 +501,7 @@ def main() -> int:
     test_occ_map_renders_front_hit()
     test_stamp_person_paints_grid()
     test_parse_fallback()
+    test_nested_json_not_cut_at_first_brace()
     print("perception smoke OK")
     return 0
 

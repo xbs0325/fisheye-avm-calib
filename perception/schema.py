@@ -159,6 +159,66 @@ def _close_truncated_json(s: str) -> str:
     return out
 
 
+def generated_json_closed(generated_after_open_brace: str) -> bool:
+    """True when a JSON object that started with a prefilled '{' is closed.
+
+    Worker prefills '{' in the prompt; decoder output is the rest. Stop on the
+    matching *root* '}', not the first nested obstacle/target object.
+    """
+    depth = 1
+    in_str = False
+    escape = False
+    for ch in generated_after_open_brace or "":
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth <= 0:
+                return True
+    return False
+
+
+def finalize_vlm_json(text: str) -> str:
+    """Clip to the root object, or close braces if generation was cut off."""
+    s = (text or "").strip().replace("\n", " ")
+    s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*```\s*$", "", s)
+    if not s.startswith("{"):
+        start = s.find("{")
+        s = s[start:] if start >= 0 else "{" + s
+    depth = 0
+    in_str = False
+    escape = False
+    for i, ch in enumerate(s):
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[: i + 1]
+    return _close_truncated_json(s)
+
+
 def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     """Pull the first JSON object (fences, extra text, truncated OK)."""
     if not text:
@@ -170,11 +230,11 @@ def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     if start < 0:
         return None
     s = s[start:]
+    clipped = finalize_vlm_json(s)
+    candidates = [clipped, s]
     end = s.rfind("}")
-    candidates = [s]
     if end > 0:
-        candidates.insert(0, s[: end + 1])
-    candidates.append(_close_truncated_json(s))
+        candidates.append(s[: end + 1])
     for blob in candidates:
         try:
             obj = json.loads(blob)
@@ -260,9 +320,9 @@ def parse_nav_payload(data: dict[str, Any]) -> NavResult:
             o0 = obstacles[0]
             summary = f"{o0.azimuth}:{o0.label}"
         elif free_dirs:
-            summary = f"空旷:{','.join(free_dirs)}"
+            summary = f"clear:{','.join(free_dirs)}"
         else:
-            summary = "场景不明"
+            summary = "scene unclear"
     free_frac = None
     if data.get("free_frac") is not None:
         try:
@@ -498,6 +558,15 @@ NAV_PROMPT = (
     "字段：mode,summary,obstacles[{label,azimuth,conf}],free_dirs,uncertain。"
     "azimuth=f/b/l/r/fl/fr/bl/br；label=person/chair/carton/cable/door/other。"
     "summary必须自己写。禁止编造。"
+)
+
+CAPTION_PROMPT = (
+    "This is a top-down surround stitch from a chassis robot "
+    "(up=front, down=back, left/right=sides; the image center is usually the vehicle blind zone, ignore it). "
+    "Write two or three plain English sentences: what to watch for around the vehicle "
+    "(people, boxes, cables, steps, chairs) and roughly which side; "
+    "which side looks more open to drive through; say uncertain if it is unclear. "
+    "Base it only on the image. Do not invent lane markings. Do not output JSON or markdown."
 )
 
 _AZ_CN = {

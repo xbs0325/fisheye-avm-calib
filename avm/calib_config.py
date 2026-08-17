@@ -23,6 +23,7 @@ _DEFAULT_SETTINGS = {
     "detect_duty": 0.5,
     "detect_try_scales": [1.0, 0.75, 0.5],
     "detect_use_sb": True,
+    "detect_photo_retry": True,
     "auto_lock": True,
     "sequential": True,
     "inview_margin_px": 8,
@@ -154,6 +155,7 @@ def save_all_config(payload: dict[str, Any]) -> dict[str, Any]:
         cur["detect_interval_ms"] = max(50, int(cur.get("detect_interval_ms", 500)))
         cur["detect_duty"] = min(1.0, max(0.05, float(cur.get("detect_duty", 0.5))))
         cur["detect_use_sb"] = bool(cur.get("detect_use_sb", True))
+        cur["detect_photo_retry"] = bool(cur.get("detect_photo_retry", True))
         cur["auto_lock"] = bool(cur.get("auto_lock", True))
         cur["sequential"] = bool(cur.get("sequential", True))
         cur["inview_margin_px"] = max(0, int(cur.get("inview_margin_px", 8)))

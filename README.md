@@ -1,6 +1,10 @@
 # fisheye-avm-calib
 
-**v0.2.1** — Jetson 四路鱼眼环视标定、GPU BEV 拼接，以及 YOLO-World 识别 / 占用栅格（机械臂底盘环视辅助）。
+**v0.3.0** — Jetson 四路鱼眼标定、GPU BEV 拼接，以及占用栅格 / YOLO-World / VLM（底盘环视 + 夹取方向辅助）。
+
+**场景与技术栈（推荐先读）：[`docs/OVERVIEW.md`](docs/OVERVIEW.md)**
+
+四路鱼眼装在移动底盘上 → 环视拼接成俯视 BEV → 导航占用参考、机械臂目标方位、VLM 场景说明。不发控制指令。
 
 ## 本 Demo 场景
 
@@ -11,6 +15,24 @@
 左：拼接 BEV + 占用叠层 + YOLO 目标；右：同一套栅格的俯视占用图（上=前，圈为距离）。运行：`./scripts/run_perception.sh --mode grasp --target bottle`。
 
 ## 快速开始
+
+### NVIDIA Thor（j6015 / R38.4）— 可复现步骤见 `docs/THOR.md`
+
+```bash
+cd ~/fisheye-avm-calib
+source scripts/env_opencv_cuda.sh
+
+./scripts/install_web_deps.sh          # 首次：aiortc（Ubuntu 24.04 不要裸 pip3）
+./scripts/setup_perception_thor.sh     # 首次：VLM venv + Qwen3-VL-2B
+./scripts/download_perception_models.sh
+
+./run.sh       # 环视 Demo
+./calib.sh     # 标定 / 补缝 Web  →  http://<板子IP>:8787/
+```
+
+Demo 和标定不能同时开（抢相机）。
+
+### AGX Orin（J501）/ 通用
 
 ```bash
 cd ~/bev_demo/avm_gpu   # 或本仓库克隆目录
@@ -29,7 +51,8 @@ source scripts/env_opencv_cuda.sh
 ./scripts/run_perception.sh --vlm off --mode nav --range 2.5
 ```
 
-Docker（仅 Orin / JP 7.2）：见 `docs/DOCKER.md`。感知契约与 Thor 检查表：`docs/PERCEPTION.md`。
+Docker（仅 Orin / JP 7.2）：见 `docs/DOCKER.md`。  
+**NVIDIA Thor (R38.4)**：见 `docs/THOR.md`（需本机编译 CUDA OpenCV）。感知契约与 Thor 检查表：`docs/PERCEPTION.md`。
 
 ## 说明
 
@@ -50,12 +73,13 @@ Docker（仅 Orin / JP 7.2）：见 `docs/DOCKER.md`。感知契约与 Thor 检�
 | `calib_results/*.json` | 内参 / 外参结果 |
 | `Dockerfile` / `docker-compose.yml` | JP7.2 开箱镜像 |
 | `perception/` | BEV + YOLO-World 识别 + 占用栅格 |
-| `docs/` | 管线、难点、DOCKER、PERCEPTION、WORKLOG |
+| `docs/` | OVERVIEW（场景/技术）、THOR、PERCEPTION、标定教训 |
 
 ## 版本
 
 | 版本 | 说明 |
 |------|------|
+| 0.3.0 | Thor 复现、环视 Demo UI、VLM 英文 caption、占用抗地砖误检 |
 | 0.2.1 | YOLO-World 抓取粗定位 + 占用栅格 / 2D 避障参考（机械臂底盘环视） |
 | 0.2.0 | 可配置分辨率、Probe API、JP7.2 Docker |
 | 0.1.1 | 接缝精修（2b）、联合同步计数、外参 QC/180° 定向、标定教训补全 |
