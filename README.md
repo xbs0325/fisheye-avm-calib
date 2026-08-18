@@ -1,8 +1,10 @@
 # fisheye-avm-calib
 
-**v0.3.0** — Jetson 四路鱼眼标定、GPU BEV 拼接，以及占用栅格 / YOLO-World / VLM（底盘环视 + 夹取方向辅助）。
+**v0.3.0** — From-scratch path: Jetson four-camera fisheye calibration, GPU BEV stitch, occupancy, YOLO-World, and VLM.
 
-**场景与技术栈（推荐先读）：[`docs/OVERVIEW.md`](docs/OVERVIEW.md)**
+This repository is the **implementation workbook** (cameras + chessboard → live BEV → perception). It is **not** the J601 website/demo package.
+
+**Scene & stack:** [`docs/OVERVIEW.md`](docs/OVERVIEW.md) · **v0.3.0 notes:** [`docs/RELEASE_v0.3.0.md`](docs/RELEASE_v0.3.0.md)
 
 四路鱼眼装在移动底盘上 → 环视拼接成俯视 BEV → 导航占用参考、机械臂目标方位、VLM 场景说明。不发控制指令。
 

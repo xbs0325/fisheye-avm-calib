@@ -2,6 +2,19 @@
 
 面向带机械臂的移动底盘：车身四周装四路鱼眼相机，先拼成 360° 环视，再投影成俯视地面图（BEV），供导航避障参考、机械臂夹取的方向性粗定位，以及 VLM 场景说明。本仓库当前阶段**只做感知与可视化**，不向底盘或机械臂发控制指令。
 
+## English
+
+This project puts four fisheye cameras around a mobile chassis (with an optional arm) and turns them into a single top-down ground view for driving and manipulation assist.
+
+Cameras are calibrated as fisheye (intrinsics K/D, chessboard) and registered with homographies so undistorted views land on one metric BEV. Live stitching runs on CUDA OpenCV (`remap`, `warpPerspective`, blend). From that BEV we run three heads with a fixed split of labor:
+
+- **Occupancy** — a classical 2D grid (~0.2 m cells) on appearance vs. the floor: which side is clearer and how close nearby obstacles are. This is a path/avoidance hint, not lidar SLAM.
+- **YOLO-World** — open-vocabulary boxes (bottle, chair, carton, …) mapped into `base_link` `(x_m, y_m)` and a compass bin (front / front-left / …) so the arm or chassis can yaw toward a target. 2D ground pose only, not 6DoF grasp.
+- **VLM (Qwen3-VL-2B)** — a short English caption of what to watch for around the vehicle. It is assistive scene language only: we do **not** parse the caption into coordinates; boxes and xy come from YOLO.
+
+Image up is vehicle forward. This stage visualizes perception only; it does not send chassis or arm commands. Platform: Jetson (Seeed reComputer Thor / AGX Orin).
+
+
 ## 场景
 
 ```
