@@ -4,87 +4,93 @@
 
 This repository is the **implementation workbook** (cameras + chessboard → live BEV → perception). It is **not** the J601 website/demo package.
 
-**J601 promotional demo (English, Thor-only):** [j601-surround-demo](https://github.com/xbs0325/j601-surround-demo)
+| Role | Repository |
+|------|------------|
+| **Implementation path (this repo)** | Bring up fisheye calib, GPU stitch, and perception from scratch |
+| **J601 promotional demo (English, Thor-only)** | [j601-surround-demo](https://github.com/xbs0325/j601-surround-demo) |
 
-**Scene & stack:** [`docs/OVERVIEW.md`](docs/OVERVIEW.md) · **v0.3.0 notes:** [`docs/RELEASE_v0.3.0.md`](docs/RELEASE_v0.3.0.md)
+**Docs:** [`docs/OVERVIEW.md`](docs/OVERVIEW.md) (scene + stack) · [`docs/RELEASE_v0.3.0.md`](docs/RELEASE_v0.3.0.md) (release notes)
 
-四路鱼眼装在移动底盘上 → 环视拼接成俯视 BEV → 导航占用参考、机械臂目标方位、VLM 场景说明。不发控制指令。
+Four fisheye cameras on a mobile chassis → surround stitch into a top-down BEV → occupancy for nav hints, YOLO-World grasp direction, VLM scene caption. **No chassis or arm commands** in this stage.
 
-## 本 Demo 场景
+## Demo scene
 
-本 demo 放在**带机械臂的底盘**上：四路鱼眼拼成 360° 俯视，**YOLO-World** 粗定位待抓取目标在 `base_link` 下的位置，给机械臂提供环视 FOV；同时输出占用栅格，作为**避障辅助**和**路线规划参考**（地面 2D，不是激光雷达地图）。本阶段不发底盘 / 臂控制指令。
+The demo sits on a **chassis with a robot arm**: four fisheyes stitch into a 360° top-down view. **YOLO-World** coarsely localizes grasp targets in `base_link` `(x_m, y_m)` and gives the arm surround FOV; an **occupancy grid** is a 2D ground hint for avoidance and path planning (not a LiDAR map). This stage does **not** send chassis or arm control commands.
 
-![Perception BEV：识别 + 占用](assets/perception_bev_grasp.png)
+![Perception BEV: detection + occupancy](assets/perception_bev_grasp.png)
 
-左：拼接 BEV + 占用叠层 + YOLO 目标；右：同一套栅格的俯视占用图（上=前，圈为距离）。运行：`./scripts/run_perception.sh --mode grasp --target bottle`。
+Left: stitched BEV + occupancy overlay + YOLO targets. Right: top-down occupancy map from the same grid (up = front; rings = distance). Example: `./scripts/run_perception.sh --mode grasp --target bottle`.
 
-## 快速开始
+## Quick start
 
-### NVIDIA Thor（j6015 / R38.4）— 可复现步骤见 `docs/THOR.md`
+### NVIDIA Thor (j6015 / JetPack R38.4)
+
+Reproducible board steps: [`docs/THOR.md`](docs/THOR.md). For the polished J601 demo README, use [j601-surround-demo](https://github.com/xbs0325/j601-surround-demo).
 
 ```bash
 cd ~/fisheye-avm-calib
 source scripts/env_opencv_cuda.sh
 
-./scripts/install_web_deps.sh          # 首次：aiortc（Ubuntu 24.04 不要裸 pip3）
-./scripts/setup_perception_thor.sh     # 首次：VLM venv + Qwen3-VL-2B
+./scripts/install_web_deps.sh          # first time: aiortc (do not bare pip3 on Ubuntu 24.04)
+./scripts/setup_perception_thor.sh     # first time: VLM venv + Qwen3-VL-2B
 ./scripts/download_perception_models.sh
 
-./run.sh       # 环视 Demo
-./calib.sh     # 标定 / 补缝 Web  →  http://<板子IP>:8787/
+./run.sh       # surround demo
+./calib.sh     # calib / seam web  →  http://<board-ip>:8787/
 ```
 
-Demo 和标定不能同时开（抢相机）。
+Do **not** run the demo and calib web UI at the same time (cameras are exclusive).
 
-### AGX Orin（J501）/ 通用
+### AGX Orin (J501) / generic
 
 ```bash
-cd ~/bev_demo/avm_gpu   # 或本仓库克隆目录
+cd ~/fisheye-avm-calib   # or your clone path
 source scripts/env_opencv_cuda.sh
 
-# GPU Web 引导（可跳步 + WebRTC）
+# GPU web guide (skip steps + WebRTC)
 ./scripts/run_web.sh --host 0.0.0.0 --port 8787
-# 浏览器: http://<板子IP>:8787/
+# browser: http://<board-ip>:8787/
 
-# 或 CLI
+# or CLI
 ./scripts/run_wizard.sh
 ./scripts/run_wizard.sh --web
 
-# 标定后：识别 + 占用（机械臂底盘环视辅助）
+# after calib: detection + occupancy (chassis surround assist)
 ./scripts/run_perception.sh --mode grasp --target bottle
 ./scripts/run_perception.sh --vlm off --mode nav --range 2.5
 ```
 
-Docker（仅 Orin / JP 7.2）：见 `docs/DOCKER.md`。  
-**NVIDIA Thor (R38.4)**：见 `docs/THOR.md`（需本机编译 CUDA OpenCV）。感知契约与 Thor 检查表：`docs/PERCEPTION.md`。
+- **Docker** (Orin / JP 7.2 only): [`docs/DOCKER.md`](docs/DOCKER.md)
+- **Thor (R38.4)**: [`docs/THOR.md`](docs/THOR.md) — CUDA OpenCV must be built on the board
+- **Perception contract + Thor checklist**: [`docs/PERCEPTION.md`](docs/PERCEPTION.md)
 
-## 说明
+## Notes
 
-- 采集分辨率/设备：`config/camera_profile.json`（Web 右侧可改）；状态页 Probe 可验开流。
-- remap / warp / blend 走 GPU；检测在后台线程，不堵推流。
-- 无 CUDA 时 Web 默认拒绝开流（可用 `--allow-cpu`，不推荐）。
-- 标定要点与踩坑见 `docs/CALIBRATION_LESSONS.md`。
+- Capture resolution and devices: `config/camera_profile.json` (editable in the web UI); use the status-page Probe to verify streams.
+- Remap / warp / blend run on GPU; detection runs in a background thread so streaming stays smooth.
+- Without CUDA, the web UI refuses to start streams by default (`--allow-cpu` for debug only).
+- Calibration tips and pitfalls: [`docs/CALIBRATION_LESSONS.md`](docs/CALIBRATION_LESSONS.md) (Chinese lab notes).
 
-## 目录
+## Layout
 
-| 路径 | 说明 |
-|------|------|
-| `avm/web_server.py` / `gpu_hub.py` | GPU Web |
-| `avm/camera_io.py` | 相机 profile / open / probe |
-| `avm/live_bev.py` / `cuda_cv.py` | 本机 live + CUDA 封装 |
-| `avm/wizard.py` | CLI 向导 |
-| `config/` | camera_profile / 棋盘 / placement |
-| `calib_results/*.json` | 内参 / 外参结果 |
-| `Dockerfile` / `docker-compose.yml` | JP7.2 开箱镜像 |
-| `perception/` | BEV + YOLO-World 识别 + 占用栅格 |
-| `docs/` | OVERVIEW（场景/技术）、THOR、PERCEPTION、标定教训 |
+| Path | Description |
+|------|-------------|
+| `avm/web_server.py` / `gpu_hub.py` | GPU web calib |
+| `avm/camera_io.py` | Camera profile / open / probe |
+| `avm/live_bev.py` / `cuda_cv.py` | Live BEV + CUDA helpers |
+| `avm/wizard.py` | CLI wizard |
+| `config/` | camera_profile, chessboard, placement |
+| `calib_results/*.json` | Intrinsics / extrinsics (H) |
+| `Dockerfile` / `docker-compose.yml` | JP 7.2 Docker image |
+| `perception/` | BEV occupancy, YOLO-World, VLM |
+| `docs/` | OVERVIEW, THOR, PERCEPTION, calibration lessons |
 
-## 版本
+## Versions
 
-| 版本 | 说明 |
-|------|------|
-| 0.3.0 | Thor 复现、环视 Demo UI、VLM 英文 caption、占用抗地砖误检 |
-| 0.2.1 | YOLO-World 抓取粗定位 + 占用栅格 / 2D 避障参考（机械臂底盘环视） |
-| 0.2.0 | 可配置分辨率、Probe API、JP7.2 Docker |
-| 0.1.1 | 接缝精修（2b）、联合同步计数、外参 QC/180° 定向、标定教训补全 |
-| 0.1.0 | 初版：GPU Web 引导、内外参标定、BEV 拼接 |
+| Version | Summary |
+|---------|---------|
+| 0.3.0 | Thor bring-up, surround demo UI, VLM English captions, occupancy tuned against floor grout |
+| 0.2.1 | YOLO-World grasp localization + occupancy grid / 2D avoidance hint |
+| 0.2.0 | Configurable resolution, Probe API, JP 7.2 Docker |
+| 0.1.1 | Seam refine (2b), joint sync counting, extrinsic QC / 180° orientation |
+| 0.1.0 | Initial GPU web guide, intrinsics/extrinsics, BEV stitch |
